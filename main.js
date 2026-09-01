@@ -200,9 +200,28 @@
           try { form.requestSubmit ? form.requestSubmit() : form.submit(); return; } catch (fs) {}
         }
       } catch (ignore) {}
-      try { el.click(); return; } catch (err) { throw e; }
+      try { el.click(); } catch (err) { /* swallow */ }
+      // Try clicking inner clickable children
+      try {
+        const inner = el.querySelector && (el.querySelector('button, a, [role="button"], span, div'));
+        if (inner) {
+          try { inner.click(); return; } catch (ie) {}
+        }
+      } catch (ignore) {}
+      // Try ancestor anchor
+      try {
+        const anc = el.closest && (el.closest('a') || el.closest('[role="button"]'));
+        if (anc) {
+          try { anc.click(); return; } catch (ae) {}
+        }
+      } catch (ignore) {}
+      throw e;
     }
   }
+
+  // Expose the click helper for debugging from the console
+  window.IVAC = window.IVAC || {};
+  window.IVAC.performNativeClick = performNativeClick;
 
   // ==========================================================
   // UI Builder
