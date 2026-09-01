@@ -223,6 +223,93 @@
   window.IVAC = window.IVAC || {};
   window.IVAC.performNativeClick = performNativeClick;
 
+  // -------------------------
+  // React-safe sign-in helpers
+  // -------------------------
+
+  let signInSubmitted = false;
+
+  function setReactInput(input, value) {
+    if (!input) return;
+
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value'
+    ).set;
+
+    setter.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    input.dispatchEvent(new Event('blur', { bubbles: true }));
+  }
+
+  function findSignInButton() {
+    return [...document.querySelectorAll('button')].find(button =>
+      /sign in now|sign in|login/i.test(
+        (button.textContent || '').replace(/\s+/g, ' ').trim()
+      )
+    );
+  }
+
+  function cloudflareCompleted() {
+    const token = document.querySelector(
+      'input[name="cf-turnstile-response"]'
+    );
+
+    return Boolean(token?.value?.trim());
+  }
+
+  function submitSignIn() {
+    if (signInSubmitted) return;
+
+    const button = findSignInButton();
+
+    if (!button || button.disabled) return;
+
+    signInSubmitted = true;
+
+    const form = button.closest('form');
+
+    if (form?.requestSubmit) {
+      form.requestSubmit(button);
+    } else {
+      button.click();
+    }
+
+    console.log('✅ Sign In submitted');
+  }
+
+  function autoSignIn(mobile, password) {
+    const mobileInput =
+      document.querySelector('input[type="tel"]') ||
+      document.querySelector('input[name*="phone" i]') ||
+      document.querySelector('input[name*="mobile" i]');
+
+    const passwordInput =
+      document.querySelector('input[type="password"]');
+
+    if (!mobileInput || !passwordInput) {
+      console.error('❌ Login inputs পাওয়া যায়নি');
+      setStatus('Login inputs not found on page', 'error');
+      return;
+    }
+
+    setReactInput(mobileInput, mobile);
+    setReactInput(passwordInput, password);
+
+    const checker = setInterval(() => {
+      if (cloudflareCompleted()) {
+        clearInterval(checker);
+
+        // wait briefly for React state to settle
+        setTimeout(submitSignIn, 500);
+      }
+    }, 500);
+
+    // stop checking after 2 minutes
+    setTimeout(() => clearInterval(checker), 120000);
+  }
+
   // ==========================================================
   // UI Builder
   // ==========================================================
@@ -471,47 +558,8 @@
   // Actions
   // ==========================================================
   async function doLogin() {
-    try {
-      const phone = document.getElementById('ivac-phone').value;
-      const password = document.getElementById('ivac-password').value;
-      if (!phone || !password) {
-        setStatus('Phone and password required.', 'warn');
-        return;
-      }
-      setStatus('Filling login fields...', 'warn');
-      await fillInput(CONFIG.phoneInput, phone);
-      await fillInput(CONFIG.passwordInput, password);
-      // Wait for the visible login button (e.g., "Sign In Now") and click it.
-      // This avoids using invalid CSS selectors like :contains(...).
-      const loginBtn = await waitForLoginButton(15000);
-      await performNativeClick(loginBtn);
-      setStatus('Login submitted. Check for OTP.', 'ok');
-      // After submitting login, wait for OTP input on the page and prompt the user in helper.
-      try {
-        const pageOtp = await waitForSelector(CONFIG.otpInput, 120000).catch(() => null);
-        if (pageOtp) {
-          setStatus('OTP page detected. Enter OTP in helper and press Verify.', 'ok');
-          const helperOtp = document.getElementById('ivac-otp');
-          if (helperOtp) {
-            helperOtp.focus();
-          }
-          // If the page OTP field is already filled (autofill), copy it into helper and submit.
-          const val = (pageOtp.value || '').trim();
-          if (val && val.length >= 4) {
-            const helperOtpField = document.getElementById('ivac-otp');
-            helperOtpField.value = val;
-            await doVerify();
-          }
-        } else {
-          setStatus('OTP input not detected; please enter OTP manually when prompted.', 'warn');
-        }
-      } catch (e) {
-        console.error('Error waiting for OTP:', e);
-      }
-    } catch (err) {
-      setStatus('Login failed: ' + err.message, 'error');
-      console.error(err);
-    }
+    // Deprecated: replaced by React-safe autoSignIn flow via helper button.
+    console.warn('doLogin() is replaced by autoSignIn flow; call helper login button instead');
   }
 
   async function doVerify() {
@@ -677,7 +725,16 @@
       }
     });
 
-    document.getElementById('ivac-btn-login').addEventListener('click', doLogin);
+    document.getElementById('ivac-btn-login').addEventListener('click', () => {
+      // Reset submission flag and start React-safe auto sign in
+      signInSubmitted = false;
+      const helperMobileInput = document.getElementById('ivac-phone');
+      const helperPasswordInput = document.getElementById('ivac-password');
+      autoSignIn(
+        helperMobileInput.value.trim(),
+        helperPasswordInput.value
+      );
+    });
     document.getElementById('ivac-btn-verify').addEventListener('click', doVerify);
     // Submit OTP by pressing Enter in the helper OTP input
     document.getElementById('ivac-otp').addEventListener('keydown', (e) => {
