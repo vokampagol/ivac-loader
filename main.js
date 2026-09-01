@@ -7,11 +7,12 @@
   // CONFIG: Update these selectors after inspecting the page.
   // ==========================================================
   const CONFIG = {
-    phoneInput: 'input[placeholder*="phone"], input[name*="phone"], input[name*="mobile"], input[type="tel"]',
-    passwordInput: 'input[type="password"], input[name*="password"]',
-    otpInput: 'input[placeholder*="OTP"], input[name*="otp"], input[maxlength="6"]',
-    loginButton: 'button[type="submit"], button:contains("Login")',
-    verifyButton: 'button:contains("Verify")',
+    phoneInput: 'input#phone, input#mobile, input[id*="phone"], input[id*="mobile"], input[name*="phone"], input[name*="mobile"], input[placeholder^="01"], input[placeholder*="01"]',
+    passwordInput: 'input[type="password"], input[name*="password"], input[id*="password"]',
+    otpInput: 'input[placeholder*="OTP"], input[name*="otp"], input[id*="otp"], input[maxlength="6"]',
+    // Buttons are located by text when necessary; prefer CSS selectors when possible
+    loginButton: 'button[type="submit"], input[type="submit"], button[id*="login"], button[class*="login"], a[id*="login"], a[class*="login"]',
+    verifyButton: 'button[id*="verify"], button[class*="verify"]',
     fileInput: 'input[type="file"]',
     citySelect: 'select[name*="city"], select[name*="location"]',
     centerSelect: 'select[name*="center"], select[name*="office"]',
@@ -21,16 +22,31 @@
    * Wait for an element to appear in the DOM.
    */
   async function waitForSelector(selector, timeout = 10000) {
-    const existing = document.querySelector(selector);
-    if (existing) return existing;
+    // If selector uses a non-standard :contains(...) token, delegate to waitForText
+    const containsMatch = typeof selector === 'string' && selector.match(/:contains\((?:"|')?(.*?)(?:"|')?\)/i);
+    if (containsMatch) {
+      return waitForText(containsMatch[1], timeout);
+    }
+
+    try {
+      const existing = document.querySelector(selector);
+      if (existing) return existing;
+    } catch (e) {
+      // Invalid selector — fall back to a timeout-based failure
+      return Promise.reject(new Error('Invalid selector: ' + selector));
+    }
 
     return new Promise((resolve, reject) => {
       const observer = new MutationObserver(() => {
-        const el = document.querySelector(selector);
-        if (el) {
-          observer.disconnect();
-          clearTimeout(timer);
-          resolve(el);
+        try {
+          const el = document.querySelector(selector);
+          if (el) {
+            observer.disconnect();
+            clearTimeout(timer);
+            resolve(el);
+          }
+        } catch (err) {
+          // Swallow invalid-selector errors inside observer; they were handled above.
         }
       });
 
@@ -46,6 +62,61 @@
           observer.observe(document.body, { childList: true, subtree: true });
         }, { once: true });
       }
+    });
+  }
+
+  // Wait for an element that contains the provided text (case-insensitive).
+  async function waitForText(textRegex, timeout = 10000, tagFilter = 'button,a,input') {
+    const re = typeof textRegex === 'string' ? new RegExp(textRegex, 'i') : textRegex;
+    const finder = () => {
+      return Array.from(document.querySelectorAll(tagFilter)).find(el => re.test((el.textContent || el.value || '').trim()));
+    };
+    const existing = finder();
+    if (existing) return existing;
+    return new Promise((resolve, reject) => {
+      const observer = new MutationObserver(() => {
+        const el = finder();
+        if (el) {
+          observer.disconnect();
+          clearTimeout(timer);
+          resolve(el);
+        }
+      });
+      const timer = setTimeout(() => {
+        observer.disconnect();
+        reject(new Error(`Timeout waiting for text: ${textRegex}`));
+      }, timeout);
+      if (document.body) {
+        observer.observe(document.body, { childList: true, subtree: true });
+      } else {
+        window.addEventListener('DOMContentLoaded', () => {
+          observer.observe(document.body, { childList: true, subtree: true });
+        }, { once: true });
+      }
+    });
+  }
+
+  // Find login button by visible text (robust against non-standard selectors)
+  function findLoginButton() {
+    return [...document.querySelectorAll('button,a,input')].find(button => {
+      const text = (button.textContent || button.value || '').replace(/\s+/g, ' ').trim();
+      return /sign in now|login|sign in/i.test(text);
+    });
+  }
+
+  function waitForLoginButton(timeout = 15000, interval = 500) {
+    return new Promise((resolve, reject) => {
+      const started = Date.now();
+      const timer = setInterval(() => {
+        const button = findLoginButton();
+        if (button) {
+          clearInterval(timer);
+          resolve(button);
+        } else if (Date.now() - started >= timeout) {
+          clearInterval(timer);
+          reject(new Error('Login button পাওয়া যায়নি'));
+        }
+      }, interval);
     });
   }
 
@@ -66,9 +137,29 @@
    * Click an element once it appears.
    */
   async function click(selector) {
-    const el = await waitForSelector(selector);
-    el.click();
-    return el;
+    // If selector contains :contains("text"), extract the text and use waitForText fallback
+    const containsMatch = selector && selector.match(/:contains\((?:"|')?(.*?)(?:"|')?\)/i);
+    if (containsMatch) {
+      const text = containsMatch[1];
+      const el = await waitForText(text);
+      el.click();
+      return el;
+    }
+
+    try {
+      const el = await waitForSelector(selector);
+      el.click();
+      return el;
+    } catch (err) {
+      // As a last resort, try to find by text if selector didn't work
+      const textMatch = selector && selector.match(/(?:(?:"|')(.*?)(?:"|'))/);
+      if (textMatch) {
+        const el = await waitForText(textMatch[1]);
+        el.click();
+        return el;
+      }
+      throw err;
+    }
   }
 
   // ==========================================================
@@ -329,7 +420,10 @@
       setStatus('Filling login fields...', 'warn');
       await fillInput(CONFIG.phoneInput, phone);
       await fillInput(CONFIG.passwordInput, password);
-      await click(CONFIG.loginButton);
+      // Wait for the visible login button (e.g., "Sign In Now") and click it.
+      // This avoids using invalid CSS selectors like :contains(...).
+      const loginBtn = await waitForLoginButton(15000);
+      loginBtn.click();
       setStatus('Login submitted. Check for OTP.', 'ok');
     } catch (err) {
       setStatus('Login failed: ' + err.message, 'error');
@@ -522,5 +616,5 @@
   }
 
   // Expose helpers so you can test in the browser console.
-  window.IVAC = { waitForSelector, fillInput, click, CONFIG };
+  window.IVAC = { waitForSelector, fillInput, click, CONFIG, findLoginButton, waitForLoginButton };
 })();

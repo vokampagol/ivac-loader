@@ -1,0 +1,78 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>IVAC Helper - Login Harness</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+      body { font-family: Arial, sans-serif; padding: 24px; }
+      .container { max-width: 720px; margin: 0 auto; display:flex; gap:24px; }
+      .panel { flex:1; padding:16px; border:1px solid #ddd; border-radius:8px; }
+      label { display:block; margin-top:8px; font-weight:600 }
+      input { width:100%; padding:8px; margin-top:6px; }
+      button.submit { margin-top:12px; padding:10px 16px; background:#ff9f7a; border:none; border-radius:24px; font-weight:700 }
+    </style>
+  </head>
+  <body>
+    <h1>Login Harness (Local Test)</h1>
+    <p>This page simulates the appointment.ivacbd.com signin view so you can test `main.js` selector and click behavior.</p>
+    <div class="container">
+      <div class="panel">
+        <h3>Sign In (simulated page)</h3>
+        <form id="signin-form">
+          <label>Your Contact Number</label>
+          <input name="phone" id="page-phone" placeholder="01XXXXXXXXX" value="01332043996" />
+          <label>Password</label>
+          <input name="password" id="page-password" type="password" value="hunter2" />
+          <button type="submit" class="submit">Sign In Now</button>
+        </form>
+        <div id="page-log" style="margin-top:12px;color:#666"></div>
+      </div>
+
+      <div class="panel">
+        <h3>Helper</h3>
+        <p>Use the injected helper UI (left) or the console to trigger `IVAC.doLogin()`.</p>
+        <button id="prefill-helper">Prefill Helper Inputs</button>
+        <button id="trigger-login">Trigger Helper Login</button>
+        <div id="helper-log" style="margin-top:8px;color:#666"></div>
+      </div>
+    </div>
+
+    <script src="../main.js"></script>
+    <script>
+      // Log form submissions
+      document.getElementById('signin-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        document.getElementById('page-log').textContent = 'Form submitted: ' + document.getElementById('page-phone').value + ' / ' + document.getElementById('page-password').value;
+      });
+
+      // Prefill the helper (the helper panel adds inputs with ids ivac-phone and ivac-password)
+      document.getElementById('prefill-helper').addEventListener('click', () => {
+        const hp = document.getElementById('ivac-phone');
+        const hw = document.getElementById('ivac-password');
+        if (hp) hp.value = '01332043996';
+        if (hw) hw.value = 'hunter2';
+        document.getElementById('helper-log').textContent = 'Helper inputs prefilling attempted.';
+      });
+
+      document.getElementById('trigger-login').addEventListener('click', async () => {
+        if (window.IVAC && typeof window.IVAC.fillInput === 'function') {
+          try {
+            // Use the helper-injected doLogin via the helper's button click
+            const helperBtn = document.getElementById('ivac-btn-login');
+            if (helperBtn) {
+              helperBtn.click();
+              document.getElementById('helper-log').textContent = 'Helper login button clicked.';
+            } else {
+              document.getElementById('helper-log').textContent = 'Helper not injected yet.';
+            }
+          } catch (err) {
+            document.getElementById('helper-log').textContent = 'Error: ' + err.message;
+          }
+        } else {
+          document.getElementById('helper-log').textContent = 'IVAC helper API not available.';
+        }
+      });
+    </script>
+  </body>
+</html>
