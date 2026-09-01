@@ -91,5 +91,4 @@
         .then(() => console.log('[IVAC Loader] main.js loaded via fetch/blob'))
         .catch(e => console.error('[IVAC Loader] Could not load main.js:', e));
     });
->>>>>>> 020a8f0 (chore: bump ivac-loader.user.js version to 1.1 and add fixes/test harness)
-})();
+  })();
