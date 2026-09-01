@@ -425,6 +425,28 @@
       const loginBtn = await waitForLoginButton(15000);
       loginBtn.click();
       setStatus('Login submitted. Check for OTP.', 'ok');
+      // After submitting login, wait for OTP input on the page and prompt the user in helper.
+      try {
+        const pageOtp = await waitForSelector(CONFIG.otpInput, 120000).catch(() => null);
+        if (pageOtp) {
+          setStatus('OTP page detected. Enter OTP in helper and press Verify.', 'ok');
+          const helperOtp = document.getElementById('ivac-otp');
+          if (helperOtp) {
+            helperOtp.focus();
+          }
+          // If the page OTP field is already filled (autofill), copy it into helper and submit.
+          const val = (pageOtp.value || '').trim();
+          if (val && val.length >= 4) {
+            const helperOtpField = document.getElementById('ivac-otp');
+            helperOtpField.value = val;
+            await doVerify();
+          }
+        } else {
+          setStatus('OTP input not detected; please enter OTP manually when prompted.', 'warn');
+        }
+      } catch (e) {
+        console.error('Error waiting for OTP:', e);
+      }
     } catch (err) {
       setStatus('Login failed: ' + err.message, 'error');
       console.error(err);
@@ -596,6 +618,13 @@
 
     document.getElementById('ivac-btn-login').addEventListener('click', doLogin);
     document.getElementById('ivac-btn-verify').addEventListener('click', doVerify);
+    // Submit OTP by pressing Enter in the helper OTP input
+    document.getElementById('ivac-otp').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        doVerify();
+      }
+    });
     document.getElementById('ivac-btn-application').addEventListener('click', doApplication);
     document.getElementById('ivac-btn-reset').addEventListener('click', doReset);
     document.getElementById('ivac-files').addEventListener('change', updateFileList);
