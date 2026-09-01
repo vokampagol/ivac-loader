@@ -142,13 +142,13 @@
     if (containsMatch) {
       const text = containsMatch[1];
       const el = await waitForText(text);
-      el.click();
+      await performNativeClick(el);
       return el;
     }
 
     try {
       const el = await waitForSelector(selector);
-      el.click();
+      await performNativeClick(el);
       return el;
     } catch (err) {
       // As a last resort, try to find by text if selector didn't work
@@ -159,6 +159,48 @@
         return el;
       }
       throw err;
+    }
+  }
+
+  // Perform a robust native-style click on an element.
+  async function performNativeClick(el) {
+    if (!el) throw new Error('Element not found for click');
+    try {
+      el.scrollIntoView({ block: 'center', inline: 'center' });
+      el.focus();
+      // If disabled, try enabling temporarily
+      if (el.disabled) el.disabled = false;
+      // Ensure pointer events are allowed
+      const prevPointer = el.style.pointerEvents;
+      el.style.pointerEvents = 'auto';
+
+      const rect = el.getBoundingClientRect();
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const events = ['mouseover', 'mousemove', 'mousedown', 'mouseup', 'click'];
+      for (const type of events) {
+        const ev = new MouseEvent(type, {
+          view: window,
+          bubbles: true,
+          cancelable: true,
+          clientX: Math.round(cx),
+          clientY: Math.round(cy),
+        });
+        el.dispatchEvent(ev);
+        await new Promise(r => setTimeout(r, 8));
+      }
+
+      // restore pointer-events
+      el.style.pointerEvents = prevPointer || '';
+    } catch (e) {
+      // fallback: try to submit enclosing form or click via element.click()
+      try {
+        const form = el.closest && el.closest('form');
+        if (form) {
+          try { form.requestSubmit ? form.requestSubmit() : form.submit(); return; } catch (fs) {}
+        }
+      } catch (ignore) {}
+      try { el.click(); return; } catch (err) { throw e; }
     }
   }
 
@@ -423,7 +465,7 @@
       // Wait for the visible login button (e.g., "Sign In Now") and click it.
       // This avoids using invalid CSS selectors like :contains(...).
       const loginBtn = await waitForLoginButton(15000);
-      loginBtn.click();
+      await performNativeClick(loginBtn);
       setStatus('Login submitted. Check for OTP.', 'ok');
       // After submitting login, wait for OTP input on the page and prompt the user in helper.
       try {
