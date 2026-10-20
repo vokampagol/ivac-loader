@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IVAC Appointment Loader
 // @namespace    https://github.com/vokampagol/ivac-loader
-// @version      1.3
+// @version      1.4
 // @description  Loads the latest main.js from GitHub for appointment.ivacbd.com
 // @author       vokampagol
 // @match        https://appointment.ivacbd.com/*
@@ -79,17 +79,38 @@
     throw new Error(errors.join(' | '));
   }
 
+  // Small on-page badge so you can see the loader status without opening DevTools.
+  function badge(text, ok) {
+    try {
+      let b = document.getElementById('ivac-loader-badge');
+      if (!b) {
+        b = document.createElement('div');
+        b.id = 'ivac-loader-badge';
+        b.style.cssText = 'position:fixed;right:10px;bottom:10px;z-index:2147483647;padding:6px 10px;border-radius:6px;font:12px sans-serif;color:#fff;max-width:340px;cursor:pointer';
+        b.title = 'click to hide';
+        b.onclick = () => b.remove();
+        (document.body || document.documentElement).appendChild(b);
+      }
+      b.style.background = ok ? '#16a34a' : '#dc2626';
+      b.textContent = 'IVAC Loader v1.4: ' + text;
+      if (ok) setTimeout(() => b.remove(), 6000);
+    } catch (e) {}
+  }
+
   async function main() {
+    badge('starting...', true);
     let lastErr;
     for (const url of SOURCES) {
       try {
         const code = await download(url);
         const how = run(code);
         console.log(TAG, `main.js loaded via ${how} from`, url.split('?')[0]);
+        badge('main.js loaded (' + how + ')', true);
         return;
       } catch (e) {
         lastErr = e;
         console.warn(TAG, 'failed for', url.split('?')[0], '-', e.message);
+        badge('FAILED ' + url.split('/')[2] + ': ' + e.message, false);
       }
     }
     console.error(TAG, 'Could not load main.js:', lastErr);
