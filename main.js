@@ -472,6 +472,10 @@
         </div>
 
         <div class="ivac-row">
+          <input type="text" class="ivac-input" id="ivac-device-id" placeholder="Device ID">
+        </div>
+
+        <div class="ivac-row">
           <button class="ivac-btn ivac-btn-green" id="ivac-btn-login">▶ Login</button>
           <input type="text" class="ivac-input" id="ivac-otp" placeholder="OTP (6 digit)">
         </div>
@@ -552,6 +556,118 @@
     status.className = `ivac-status ${type === 'warn' ? 'warn' : type === 'error' ? 'error' : ''}`;
     const icon = type === 'ok' ? '✅' : type === 'warn' ? '⚠️' : '❌';
     status.innerHTML = `<span>${icon}</span><span>${text}</span>`;
+  }
+
+  function getStoredDeviceId() {
+    try {
+      if (typeof GM_getValue === 'function') {
+        const saved = GM_getValue('ivac_device_id', '');
+        if (saved) return String(saved).trim();
+      }
+    } catch (e) {}
+    try {
+      const saved = localStorage.getItem('ivac_device_id');
+      if (saved) return String(saved).trim();
+    } catch (e) {}
+    return '';
+  }
+
+  function saveDeviceId(value) {
+    const clean = String(value || '').trim();
+    try {
+      if (typeof GM_setValue === 'function') GM_setValue('ivac_device_id', clean);
+    } catch (e) {}
+    try {
+      localStorage.setItem('ivac_device_id', clean);
+    } catch (e) {}
+    const input = document.getElementById('ivac-device-id');
+    if (input) input.value = clean;
+    return clean;
+  }
+
+  function parseSmsOtpFromText(text) {
+    if (!text || typeof text !== 'string') return '';
+    const map = {
+      zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9'
+    };
+    const normalized = text.toLowerCase().replace(/[^a-z\s-]/g, ' ');
+    const words = normalized.split(/\s+|-/).filter(Boolean);
+    const digits = words.map(w => map[w]).filter(v => v !== undefined).join('');
+    if (/^\d{4,8}$/.test(digits)) return digits;
+    const fallBack = (text.match(/\d{4,8}/) || [])[0];
+    return fallBack || '';
+  }
+
+  function fillOtpCode(code) {
+    const digits = String(code || '').replace(/\D/g, '').slice(0, 6);
+    if (!digits) return false;
+
+    const singleOtpInputs = Array.from(document.querySelectorAll('input')).filter((el) => {
+      const descriptor = `${el.name || ''} ${el.id || ''} ${el.placeholder || ''}`.toLowerCase();
+      return /otp|code|verification/.test(descriptor) && (el.maxLength === 1 || el.type === 'tel' || el.type === 'text');
+    });
+
+    if (singleOtpInputs.length >= 6) {
+      for (let i = 0; i < 6; i++) {
+        const el = singleOtpInputs[i];
+        if (!el) break;
+        setReactInput(el, digits[i] || '');
+      }
+      return true;
+    }
+
+    const directOtpInput = document.querySelector(CONFIG.otpInput) || document.querySelector('input[name*="otp" i], input[id*="otp" i], input[placeholder*="OTP" i]');
+    if (directOtpInput) {
+      setReactInput(directOtpInput, digits);
+      return true;
+    }
+
+    const firstOtpField = singleOtpInputs[0];
+    if (firstOtpField) {
+      setReactInput(firstOtpField, digits);
+      return true;
+    }
+
+    return false;
+  }
+
+  async function fetchLatestOtpAndFill(deviceId) {
+    const cleanDeviceId = String(deviceId || '').trim();
+    if (!cleanDeviceId) {
+      setStatus('Device ID is required before checking SMS.', 'warn');
+      return;
+    }
+
+    setStatus(`Checking SMS for device ${cleanDeviceId}...`, 'warn');
+    try {
+      const response = await fetch(`https://sms-sight-show.lovable.app/api/public/sms/latest?device_id=${encodeURIComponent(cleanDeviceId)}`, {
+        method: 'GET',
+        headers: {
+          'x-api-secret': 'SMozWI2IR53xXPdXGktNhti4aDwu09mY3LhIgGz059zCPWEW',
+          'Accept': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const payload = await response.json();
+      const otp = parseSmsOtpFromText(payload && payload.body ? payload.body : '');
+      if (!otp) {
+        setStatus('No OTP found in latest SMS yet.', 'warn');
+        return;
+      }
+
+      if (fillOtpCode(otp)) {
+        setStatus(`OTP auto-filled from SMS: ${otp}`, 'ok');
+      } else {
+        setStatus('OTP parsed but no OTP field was found on page.', 'warn');
+      }
+    } catch (error) {
+      setStatus('SMS lookup failed: ' + error.message, 'error');
+      console.error('[IVAC Helper] OTP fetch failed', error);
+    }
   }
 
   // ==========================================================
@@ -730,10 +846,19 @@
       signInSubmitted = false;
       const helperMobileInput = document.getElementById('ivac-phone');
       const helperPasswordInput = document.getElementById('ivac-password');
+      const deviceIdInput = document.getElementById('ivac-device-id');
+      const deviceId = saveDeviceId(deviceIdInput ? deviceIdInput.value : '');
+
       autoSignIn(
         helperMobileInput.value.trim(),
         helperPasswordInput.value
       );
+
+      if (deviceId) {
+        setTimeout(() => fetchLatestOtpAndFill(deviceId), 5000);
+      } else {
+        setStatus('Device ID is empty. Add it before login.', 'warn');
+      }
     });
     document.getElementById('ivac-btn-verify').addEventListener('click', doVerify);
     // Submit OTP by pressing Enter in the helper OTP input
@@ -751,6 +876,10 @@
     document.getElementById('ivac-btn-center').addEventListener('click', doSelectCenter);
     document.getElementById('ivac-btn-booking').addEventListener('click', doBooking);
     document.getElementById('ivac-btn-auto').addEventListener('click', doAutoDate);
+
+    const savedDeviceId = getStoredDeviceId();
+    const deviceIdInput = document.getElementById('ivac-device-id');
+    if (deviceIdInput && savedDeviceId) deviceIdInput.value = savedDeviceId;
 
     log('Helper panel injected on', window.location.href);
     setStatus('Helper ready. Update CONFIG selectors if needed.', 'ok');
