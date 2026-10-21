@@ -41,3 +41,13 @@ git push origin v1.0.1
 
 Security and CSP:
 - If the site enforces a strict Content Security Policy (CSP), `raw.githubusercontent.com` script loads may be blocked. In that case publish `main.js` via GitHub Pages or another allowed host and update `ivac-loader.user.js` `REPO/BRANCH/FILE` accordingly.
+
+## Which userscript to install in Tampermonkey
+
+Install **only** `ivac-loader.user.js` (v1.6). It downloads the latest `main.js` from this repo on every page load,
+so later changes to `main.js` need no reinstall. Do **not** install `ivac-helper.user.js` (old Phase-1 UI) at the same
+time - both create `#ivac-helper-panel`.
+
+`main.js` features: Device ID (saved with GM_setValue), auto OTP fetch ~5 s after Login (API secret is entered once in
+the CONFIG tab and stored only in Tampermonkey storage - never commit it), FILES tab (1 primary + 3 secondary PDFs,
+kept in memory only), LOG tab. Cloudflare / CAPTCHA are never bypassed and no form is auto-submitted by the file tools.

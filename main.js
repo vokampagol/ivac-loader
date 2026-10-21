@@ -4,6 +4,403 @@
   const log = (...args) => console.log('[IVAC Helper]', ...args);
 
   // ==========================================================
+  // Environment bridge (Tampermonkey GM_* access)
+  // The loader (ivac-loader.user.js) passes a bridge object as __IVAC_GM__.
+  // If it is missing (e.g. test harness) we fall back to localStorage / fetch.
+  // ==========================================================
+  const GMX = (typeof __IVAC_GM__ !== 'undefined' && __IVAC_GM__) || window.__IVAC_GM__ || null;
+  const HAS_GM_STORE = !!(GMX && typeof GMX.get === 'function' && typeof GMX.set === 'function');
+
+  /** Persistent key/value store: GM_setValue/GM_getValue when available, else localStorage. */
+  const store = {
+    async get(key, fallback = '') {
+      try {
+        if (HAS_GM_STORE) {
+          const v = await GMX.get(key, fallback);
+          return v === undefined || v === null ? fallback : v;
+        }
+        const raw = localStorage.getItem('ivac_helper_' + key);
+        return raw === null ? fallback : JSON.parse(raw);
+      } catch (e) {
+        return fallback;
+      }
+    },
+    async set(key, value) {
+      try {
+        if (HAS_GM_STORE) await GMX.set(key, value);
+        else localStorage.setItem('ivac_helper_' + key, JSON.stringify(value));
+      } catch (e) {
+        console.warn('[IVAC Helper] store.set failed', key, e);
+      }
+    },
+  };
+
+  /** HTTP GET through Tampermonkey (no CORS/CSP limits) or plain fetch as fallback. */
+  async function httpGet(url, headers = {}) {
+    if (GMX && typeof GMX.http === 'function') {
+      return GMX.http({ method: 'GET', url, headers });
+    }
+    const r = await fetch(url, { headers, cache: 'no-store', credentials: 'omit' });
+    return { status: r.status, text: await r.text() };
+  }
+
+  // ==========================================================
+  // LOG (shown in the LOG tab; also mirrored to the console)
+  // ==========================================================
+  const LOG_MAX = 200;
+  const logLines = [];
+
+  function renderLogLine(box, entry) {
+    const row = document.createElement('div');
+    row.className = 'ivac-log-line ' + entry.level;
+    row.textContent = `[${entry.time}] ${entry.msg}`;
+    box.appendChild(row);
+  }
+
+  /** Add a line to the LOG tab. Never pass secrets in here. */
+  function addLog(msg, level = 'info') {
+    const entry = { time: new Date().toLocaleTimeString(), level, msg: String(msg) };
+    logLines.push(entry);
+    if (logLines.length > LOG_MAX) logLines.shift();
+    log(entry.msg);
+    const box = document.getElementById('ivac-log');
+    if (box) {
+      renderLogLine(box, entry);
+      while (box.childNodes.length > LOG_MAX) box.removeChild(box.firstChild);
+      box.scrollTop = box.scrollHeight;
+    }
+  }
+
+  function renderAllLogs() {
+    const box = document.getElementById('ivac-log');
+    if (!box) return;
+    box.textContent = '';
+    logLines.forEach((e) => renderLogLine(box, e));
+    box.scrollTop = box.scrollHeight;
+  }
+
+  // ==========================================================
+  // Settings (Device ID, API secret, API URL, OTP delay)
+  // ==========================================================
+  const DEFAULT_OTP_API = 'https://sms-sight-show.lovable.app/api/public/sms/latest';
+  const settings = { deviceId: '', apiSecret: '', apiUrl: DEFAULT_OTP_API, otpDelaySec: 5 };
+
+  async function loadSettings() {
+    settings.deviceId = String(await store.get('deviceId', ''));
+    settings.apiSecret = String(await store.get('apiSecret', ''));
+    settings.apiUrl = String(await store.get('apiUrl', DEFAULT_OTP_API)) || DEFAULT_OTP_API;
+    const d = Number(await store.get('otpDelaySec', 5));
+    settings.otpDelaySec = Number.isFinite(d) && d >= 0 ? d : 5;
+    if (!HAS_GM_STORE) addLog('GM storage not available - settings are kept in browser localStorage.', 'warn');
+  }
+
+  // ==========================================================
+  // OTP: fetch latest SMS from the user's own SMS-forwarding API and parse the code
+  // (No captcha/Cloudflare handling here. Only the user's own SMS is read.)
+  // ==========================================================
+  const OTP_LENGTH = 6;
+  const NUMBER_WORDS = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
+  const WORD_RUN_RE = /(?:\b(?:zero|one|two|three|four|five|six|seven|eight|nine)\b[\s,.\-–—_]*)+/gi;
+
+  /**
+   * Extract an OTP from SMS text.
+   *  "Two-Six-Two-Seven-Eight-Zero" -> "262780"
+   *  "Your OTP is 262780"           -> "262780"
+   *  "2-6-2-7-8-0"                  -> "262780"
+   * Returns '' when no OTP_LENGTH-digit code is found.
+   */
+  function parseOtp(text) {
+    if (!text || typeof text !== 'string') return '';
+
+    // 1) spelled-out digits
+    const runs = text.match(WORD_RUN_RE) || [];
+    for (const run of runs) {
+      const words = run.toLowerCase().match(/zero|one|two|three|four|five|six|seven|eight|nine/g) || [];
+      if (words.length === OTP_LENGTH) return words.map((w) => NUMBER_WORDS[w]).join('');
+    }
+
+    // 2) digits separated by - or space: "2-6-2-7-8-0"
+    const sep = text.match(/(?<!\d)(?:\d[\s\-]){5}\d(?!\d)/);
+    if (sep) {
+      const digits = sep[0].replace(/\D/g, '');
+      if (digits.length === OTP_LENGTH) return digits;
+    }
+
+    // 3) plain 6-digit number
+    const plain = text.match(/(?<!\d)\d{6}(?!\d)/);
+    return plain ? plain[0] : '';
+  }
+
+  /** Collect every string value from an arbitrary JSON payload (message text can be in any field). */
+  function collectStrings(value, out = []) {
+    if (typeof value === 'string') out.push(value);
+    else if (Array.isArray(value)) value.forEach((v) => collectStrings(v, out));
+    else if (value && typeof value === 'object') Object.values(value).forEach((v) => collectStrings(v, out));
+    return out;
+  }
+
+  /** Call the SMS API once and return { otp, status }. Secret is only sent as a header. */
+  async function fetchLatestOtp() {
+    const deviceId = (settings.deviceId || '').trim();
+    if (!deviceId) throw new Error('Device ID is empty');
+    if (!settings.apiSecret) throw new Error('API secret not set (CONFIG tab)');
+
+    const url = `${settings.apiUrl}?device_id=${encodeURIComponent(deviceId)}`;
+    const res = await httpGet(url, { 'x-api-secret': settings.apiSecret, Accept: 'application/json' });
+    if (res.status < 200 || res.status >= 300) throw new Error('SMS API HTTP ' + res.status);
+
+    let texts;
+    try {
+      texts = collectStrings(JSON.parse(res.text));
+    } catch (e) {
+      texts = [res.text]; // plain-text response
+    }
+    for (const t of texts) {
+      const otp = parseOtp(t);
+      if (otp) return { otp, status: res.status };
+    }
+    return { otp: '', status: res.status };
+  }
+
+  /** CSS selector for the IVAC page's own OTP input (never the helper's input). */
+  function pageOtpSelector() {
+    return CONFIG.otpInput.split(',').map((s) => `${s.trim()}:not(#ivac-helper-panel *)`).join(',');
+  }
+
+  function findPageOtpInput() {
+    try {
+      return document.querySelector(pageOtpSelector());
+    } catch (e) {
+      return null;
+    }
+  }
+
+  let otpTimer = null;
+  let otpBusy = false;
+
+  /** Fetch the OTP and fill the helper OTP field (+ the page's OTP field if it is already shown). Does NOT click Verify. */
+  async function fetchAndFillOtp(source = 'manual') {
+    if (otpBusy) return;
+    otpBusy = true;
+    try {
+      addLog(`OTP fetch (${source}) for device "${settings.deviceId}"...`);
+      setStatus('Fetching OTP...', 'warn');
+      const { otp } = await fetchLatestOtp();
+      if (!otp) {
+        addLog('No OTP found in the latest SMS. Enter it manually or press the OTP fetch button again.', 'warn');
+        setStatus('No OTP found yet - enter manually or retry.', 'warn');
+        return;
+      }
+      const helperOtp = document.getElementById('ivac-otp');
+      if (helperOtp) helperOtp.value = otp;
+      const pageOtp = findPageOtpInput();
+      if (pageOtp) setReactInput(pageOtp, otp);
+      addLog(`OTP filled (${otp.length} digits)${pageOtp ? ' in helper + page field' : ' in helper field'}. Press Verify.`);
+      setStatus('OTP filled. Press Verify.', 'ok');
+    } catch (err) {
+      addLog('OTP fetch failed: ' + err.message, 'error');
+      setStatus('OTP fetch failed: ' + err.message, 'error');
+    } finally {
+      otpBusy = false;
+    }
+  }
+
+  /** After Login is clicked, wait N seconds (default 5) and then fetch the OTP once. */
+  function scheduleOtpFetch() {
+    clearTimeout(otpTimer);
+    const sec = settings.otpDelaySec;
+    addLog(`OTP will be fetched in ${sec}s.`);
+    otpTimer = setTimeout(() => fetchAndFillOtp('auto'), sec * 1000);
+  }
+
+  // ==========================================================
+  // FILES: 1 primary + 3 secondary PDFs, kept only in memory (never stored/uploaded by the helper)
+  // ==========================================================
+  const FILE_SLOTS = [
+    { key: 'primary', label: 'Primary Applicant', clearLabel: 'Clear primary' },
+    { key: 'sec1', label: 'Secondary 1', clearLabel: 'Clear secondary 1' },
+    { key: 'sec2', label: 'Secondary 2', clearLabel: 'Clear secondary 2' },
+    { key: 'sec3', label: 'Secondary 3', clearLabel: 'Clear secondary 3' },
+  ];
+  const slotFiles = {}; // key -> { file: File, status: string }
+
+  const isPdf = (f) => f && (f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
+
+  function formatSize(bytes) {
+    return bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(bytes / 1024)) + ' KB';
+  }
+
+  function renderSlot(key) {
+    const nameEl = document.getElementById(`ivac-fslot-name-${key}`);
+    const statEl = document.getElementById(`ivac-fslot-status-${key}`);
+    if (!nameEl || !statEl) return;
+    const s = slotFiles[key];
+    nameEl.textContent = s ? s.file.name : 'No file selected';
+    nameEl.title = s ? s.file.name : '';
+    statEl.textContent = s ? s.status : '-';
+    statEl.className = 'ivac-fslot-status' + (s ? (/^Applied/.test(s.status) ? ' ok' : /^(Not|Error|Skipped)/.test(s.status) ? ' err' : ' ready') : '');
+  }
+
+  function setSlotFile(key, file) {
+    if (!file) return;
+    if (!isPdf(file)) {
+      delete slotFiles[key];
+      renderSlot(key);
+      addLog(`${key}: "${file.name}" is not a PDF - ignored.`, 'warn');
+      setStatus('Only PDF files are accepted.', 'warn');
+      return;
+    }
+    slotFiles[key] = { file, status: `Ready (${formatSize(file.size)})` };
+    renderSlot(key);
+    addLog(`File selected for ${key}: ${file.name} (${formatSize(file.size)})`);
+  }
+
+  function clearSlot(key) {
+    delete slotFiles[key];
+    const input = document.getElementById(`ivac-fslot-input-${key}`);
+    if (input) input.value = '';
+    renderSlot(key);
+    addLog(`Cleared ${key}.`);
+  }
+
+  function clearAllSlots() {
+    FILE_SLOTS.forEach((s) => {
+      delete slotFiles[s.key];
+      const input = document.getElementById(`ivac-fslot-input-${s.key}`);
+      if (input) input.value = '';
+      renderSlot(s.key);
+    });
+    addLog('Cleared all files.');
+  }
+
+  /** A file input that is actually rendered on the IVAC page (not ours, not disabled, not display:none). */
+  function getPageFileInputs() {
+    return [...document.querySelectorAll(CONFIG.fileInput)].filter((el) => {
+      if (el.closest('#ivac-helper-panel') || el.disabled) return false;
+      return el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+    });
+  }
+
+  function putFilesInInput(input, files) {
+    const dt = new DataTransfer();
+    files.forEach((f) => dt.items.add(f));
+    input.files = dt.files;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  /**
+   * Map selected PDFs onto the page's visible file inputs in order:
+   * input #1 <- primary, input #2 <- secondary 1, #3 <- secondary 2, #4 <- secondary 3.
+   * One single <input multiple> receives all selected files in that order.
+   * Never submits the form.
+   */
+  function applyFiles() {
+    const selected = FILE_SLOTS.filter((s) => slotFiles[s.key]);
+    if (!selected.length) {
+      setStatus('No files selected in the FILES tab.', 'warn');
+      return 0;
+    }
+    const inputs = getPageFileInputs();
+    if (!inputs.length) {
+      addLog('APPLY FILES: no visible file input found on this page.', 'warn');
+      setStatus('No file inputs visible on the page yet.', 'warn');
+      return 0;
+    }
+
+    let applied = 0;
+    if (inputs.length === 1 && inputs[0].multiple) {
+      putFilesInInput(inputs[0], selected.map((s) => slotFiles[s.key].file));
+      selected.forEach((s) => { slotFiles[s.key].status = 'Applied -> input #1 (multiple)'; renderSlot(s.key); });
+      applied = selected.length;
+      addLog(`APPLY FILES: ${applied} file(s) put into the single multiple-file input.`);
+    } else {
+      FILE_SLOTS.forEach((slot, idx) => {
+        const entry = slotFiles[slot.key];
+        if (!entry) return;
+        const input = inputs[idx];
+        if (!input) {
+          entry.status = `Skipped - no input #${idx + 1} on page`;
+          addLog(`APPLY FILES: ${slot.label} skipped (page has only ${inputs.length} file input(s)).`, 'warn');
+        } else {
+          putFilesInInput(input, [entry.file]);
+          entry.status = `Applied -> input #${idx + 1}`;
+          applied++;
+          addLog(`APPLY FILES: ${slot.label} -> page file input #${idx + 1}.`);
+        }
+        renderSlot(slot.key);
+      });
+    }
+    setStatus(`${applied} file(s) applied. Check the form, then submit yourself.`, applied ? 'ok' : 'warn');
+    return applied;
+  }
+
+  function buildFilesPane(pane) {
+    FILE_SLOTS.forEach((slot) => {
+      const row = document.createElement('div');
+      row.className = 'ivac-fslot';
+
+      const head = document.createElement('div');
+      head.className = 'ivac-fslot-head';
+      const title = document.createElement('span');
+      title.className = 'ivac-fslot-title';
+      title.textContent = slot.label;
+      const stat = document.createElement('span');
+      stat.id = `ivac-fslot-status-${slot.key}`;
+      stat.className = 'ivac-fslot-status';
+      stat.textContent = '-';
+      head.append(title, stat);
+
+      const line = document.createElement('div');
+      line.className = 'ivac-row';
+      const pick = document.createElement('label');
+      pick.className = 'ivac-btn ivac-btn-blue ivac-pick';
+      pick.textContent = 'Choose PDF';
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'application/pdf,.pdf';
+      input.id = `ivac-fslot-input-${slot.key}`;
+      input.style.display = 'none';
+      input.addEventListener('change', () => setSlotFile(slot.key, input.files && input.files[0]));
+      pick.appendChild(input);
+      const name = document.createElement('span');
+      name.id = `ivac-fslot-name-${slot.key}`;
+      name.className = 'ivac-fslot-name';
+      name.textContent = 'No file selected';
+      line.append(pick, name);
+
+      row.append(head, line);
+      pane.appendChild(row);
+    });
+
+    const clears = document.createElement('div');
+    clears.className = 'ivac-grid2';
+    FILE_SLOTS.forEach((slot) => {
+      const b = document.createElement('button');
+      b.className = 'ivac-btn ivac-btn-red';
+      b.textContent = slot.clearLabel;
+      b.addEventListener('click', () => clearSlot(slot.key));
+      clears.appendChild(b);
+    });
+    pane.appendChild(clears);
+
+    const all = document.createElement('button');
+    all.className = 'ivac-btn ivac-btn-red ivac-full';
+    all.textContent = 'Clear all';
+    all.addEventListener('click', clearAllSlots);
+    const apply = document.createElement('button');
+    apply.className = 'ivac-btn ivac-btn-teal ivac-full';
+    apply.id = 'ivac-btn-apply-files';
+    apply.textContent = 'APPLY FILES';
+    apply.addEventListener('click', applyFiles);
+    const note = document.createElement('div');
+    note.className = 'ivac-note';
+    note.textContent = 'Files stay in this tab only (memory). Nothing is saved or submitted automatically.';
+    pane.append(all, apply, note);
+  }
+
+
+  // ==========================================================
   // CONFIG: Update these selectors after inspecting the page.
   // ==========================================================
   const CONFIG = {
@@ -277,6 +674,7 @@
     }
 
     console.log('✅ Sign In submitted');
+    addLog('Sign In form submitted (after your Cloudflare check completed).');
   }
 
   function autoSignIn(mobile, password) {
@@ -296,10 +694,12 @@
 
     setReactInput(mobileInput, mobile);
     setReactInput(passwordInput, password);
+    addLog('Login fields filled. Waiting for the Cloudflare check - complete it yourself; it is not bypassed.');
 
     const checker = setInterval(() => {
       if (cloudflareCompleted()) {
         clearInterval(checker);
+        addLog('Cloudflare check completed.');
 
         // wait briefly for React state to settle
         setTimeout(submitSignIn, 500);
@@ -307,251 +707,233 @@
     }, 500);
 
     // stop checking after 2 minutes
-    setTimeout(() => clearInterval(checker), 120000);
+    setTimeout(() => {
+      if (!signInSubmitted) addLog('Stopped waiting for Cloudflare after 2 minutes.', 'warn');
+      clearInterval(checker);
+    }, 120000);
   }
 
   // ==========================================================
   // UI Builder
   // ==========================================================
+  const PANEL_CSS = `
+    #ivac-helper-panel { position: fixed; top: 80px; left: 20px; width: 340px; max-width: calc(100vw - 16px);
+      max-height: calc(100vh - 16px); display: flex; flex-direction: column; background: rgba(15,23,42,0.97);
+      color: #e2e8f0; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.4);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 13px;
+      z-index: 2147483000; overflow: hidden; border: 1px solid rgba(148,163,184,0.2); }
+    #ivac-helper-panel * { box-sizing: border-box; }
+    .ivac-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: #0f172a;
+      border-bottom: 1px solid rgba(148,163,184,0.15); cursor: move; touch-action: none; user-select: none; }
+    .ivac-header-title { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; color: #fff; }
+    .ivac-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; }
+    .ivac-hbtns { display: flex; gap: 4px; }
+    .ivac-close { background: transparent; border: none; color: #94a3b8; font-size: 18px; cursor: pointer; line-height: 1; padding: 0 4px; }
+    .ivac-close:hover { color: #fff; }
+    .ivac-tabbar { display: flex; background: #0b1220; border-bottom: 1px solid rgba(148,163,184,0.15); }
+    .ivac-tab { flex: 1; padding: 7px 4px; background: transparent; border: none; border-bottom: 2px solid transparent;
+      color: #94a3b8; font-size: 12px; font-weight: 600; cursor: pointer; }
+    .ivac-tab.active { color: #fff; border-bottom-color: #3b82f6; }
+    .ivac-scroll { overflow: auto; min-height: 0; }
+    .ivac-pane { display: none; padding: 10px; flex-direction: column; gap: 8px; }
+    .ivac-pane.active { display: flex; }
+    .ivac-row { display: flex; gap: 6px; align-items: center; }
+    .ivac-field-label { font-size: 11px; color: #94a3b8; margin-bottom: -4px; }
+    .ivac-input, .ivac-select, .ivac-file-label { flex: 1; min-width: 0; padding: 7px 9px; border-radius: 6px;
+      border: 1px solid rgba(148,163,184,0.25); background: #1e293b; color: #e2e8f0; font-size: 13px; outline: none; }
+    .ivac-input:focus, .ivac-select:focus { border-color: #3b82f6; }
+    .ivac-input::placeholder { color: #94a3b8; }
+    .ivac-btn { padding: 7px 10px; border-radius: 6px; border: none; font-size: 12px; font-weight: 600; cursor: pointer; color: #fff;
+      transition: opacity 0.15s; white-space: nowrap; }
+    .ivac-btn:hover { opacity: 0.9; }
+    .ivac-btn-green { background: #22c55e; } .ivac-btn-blue { background: #3b82f6; } .ivac-btn-orange { background: #f97316; }
+    .ivac-btn-red { background: #ef4444; } .ivac-btn-purple { background: #8b5cf6; } .ivac-btn-teal { background: #14b8a6; }
+    .ivac-btn-gray { background: #475569; }
+    .ivac-full { width: 100%; }
+    .ivac-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    .ivac-file-wrap { display: flex; gap: 6px; align-items: center; }
+    .ivac-file-label { display: inline-flex; align-items: center; justify-content: center; cursor: pointer; padding: 7px 10px; font-size: 12px; }
+    .ivac-file-list { font-size: 11px; color: #94a3b8; min-height: 16px; }
+    .ivac-upload-btn { width: 100%; background: #14b8a6; }
+    .ivac-note { font-size: 11px; color: #94a3b8; }
+    .ivac-fslot { background: #111c33; border-radius: 8px; padding: 6px 8px; display: flex; flex-direction: column; gap: 5px; }
+    .ivac-fslot-head { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
+    .ivac-fslot-title { font-weight: 600; }
+    .ivac-fslot-status { color: #94a3b8; font-size: 11px; text-align: right; }
+    .ivac-fslot-status.ready { color: #facc15; } .ivac-fslot-status.ok { color: #22c55e; } .ivac-fslot-status.err { color: #f87171; }
+    .ivac-fslot-name { font-size: 11px; color: #cbd5e1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+    .ivac-pick { display: inline-block; }
+    .ivac-log { height: 180px; overflow: auto; background: #0b1220; border-radius: 6px; padding: 6px; font: 11px ui-monospace, Menlo, Consolas, monospace; }
+    .ivac-log-line { color: #cbd5e1; margin-bottom: 2px; word-break: break-word; }
+    .ivac-log-line.warn { color: #facc15; } .ivac-log-line.error { color: #f87171; }
+    .ivac-status { font-size: 11px; padding: 6px 10px; background: #1e293b; color: #22c55e; min-height: 28px; display: flex; align-items: center; gap: 6px;
+      border-top: 1px solid rgba(148,163,184,0.15); }
+    .ivac-status.warn { color: #facc15; } .ivac-status.error { color: #f87171; }
+    .ivac-toggle { position: fixed; top: 80px; left: 20px; z-index: 2147482999; padding: 8px 12px; border-radius: 6px; background: #3b82f6;
+      color: #fff; border: none; cursor: pointer; font-weight: 600; display: none; }
+    #ivac-helper-panel.ivac-collapsed .ivac-tabbar, #ivac-helper-panel.ivac-collapsed .ivac-scroll,
+    #ivac-helper-panel.ivac-collapsed .ivac-status { display: none; }
+    @media (max-width: 480px) { #ivac-helper-panel { width: calc(100vw - 16px); left: 8px !important; } .ivac-grid2 { grid-template-columns: 1fr; } }
+  `;
+
   function createPanel() {
     const panel = document.createElement('div');
     panel.id = 'ivac-helper-panel';
     panel.innerHTML = `
-      <style>
-        #ivac-helper-panel {
-          position: fixed;
-          top: 80px;
-          left: 20px;
-          width: 320px;
-          background: rgba(15, 23, 42, 0.96);
-          color: #e2e8f0;
-          border-radius: 12px;
-          box-shadow: 0 10px 25px rgba(0,0,0,0.4);
-          font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-          z-index: 999999;
-          overflow: hidden;
-          border: 1px solid rgba(148, 163, 184, 0.2);
-        }
-        #ivac-helper-panel * {
-          box-sizing: border-box;
-        }
-        .ivac-header {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          padding: 10px 14px;
-          background: #0f172a;
-          border-bottom: 1px solid rgba(148, 163, 184, 0.15);
-          cursor: move;
-        }
-        .ivac-header-title {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          font-weight: 600;
-          font-size: 14px;
-          color: #fff;
-        }
-        .ivac-dot {
-          width: 8px;
-          height: 8px;
-          border-radius: 50%;
-          background: #22c55e;
-        }
-        .ivac-close {
-          background: transparent;
-          border: none;
-          color: #94a3b8;
-          font-size: 18px;
-          cursor: pointer;
-          line-height: 1;
-        }
-        .ivac-close:hover { color: #fff; }
-        .ivac-body {
-          padding: 12px;
-          display: flex;
-          flex-direction: column;
-          gap: 10px;
-        }
-        .ivac-row {
-          display: flex;
-          gap: 8px;
-        }
-        .ivac-input, .ivac-select, .ivac-file-label {
-          flex: 1;
-          padding: 8px 10px;
-          border-radius: 6px;
-          border: 1px solid rgba(148, 163, 184, 0.25);
-          background: #1e293b;
-          color: #e2e8f0;
-          font-size: 13px;
-          outline: none;
-        }
-        .ivac-input:focus, .ivac-select:focus {
-          border-color: #3b82f6;
-        }
-        .ivac-input::placeholder { color: #94a3b8; }
-        .ivac-btn {
-          padding: 8px 12px;
-          border-radius: 6px;
-          border: none;
-          font-size: 12px;
-          font-weight: 600;
-          cursor: pointer;
-          color: #fff;
-          transition: opacity 0.15s;
-        }
-        .ivac-btn:hover { opacity: 0.9; }
-        .ivac-btn-green { background: #22c55e; }
-        .ivac-btn-blue { background: #3b82f6; }
-        .ivac-btn-orange { background: #f97316; }
-        .ivac-btn-red { background: #ef4444; }
-        .ivac-btn-purple { background: #8b5cf6; }
-        .ivac-btn-teal { background: #14b8a6; }
-        .ivac-file-wrap {
-          display: flex;
-          gap: 8px;
-          align-items: center;
-        }
-        .ivac-file-label {
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          cursor: pointer;
-          padding: 7px 10px;
-          font-size: 12px;
-        }
-        .ivac-file-list {
-          font-size: 11px;
-          color: #94a3b8;
-          min-height: 18px;
-        }
-        .ivac-upload-btn {
-          width: 100%;
-          background: #14b8a6;
-        }
-        .ivac-status {
-          font-size: 11px;
-          padding: 6px 8px;
-          border-radius: 6px;
-          background: #1e293b;
-          color: #22c55e;
-          min-height: 28px;
-          display: flex;
-          align-items: center;
-          gap: 6px;
-        }
-        .ivac-status.warn { color: #facc15; }
-        .ivac-status.error { color: #f87171; }
-        .ivac-toggle {
-          position: fixed;
-          top: 80px;
-          left: 20px;
-          z-index: 999998;
-          padding: 8px 12px;
-          border-radius: 6px;
-          background: #3b82f6;
-          color: #fff;
-          border: none;
-          cursor: pointer;
-          font-weight: 600;
-          display: none;
-        }
-      </style>
       <div class="ivac-header" id="ivac-drag-handle">
         <div class="ivac-header-title">
           <span class="ivac-dot"></span>
           <span>Helper</span>
         </div>
-        <button class="ivac-close" title="Hide">×</button>
+        <div class="ivac-hbtns">
+          <button class="ivac-close ivac-min" title="Minimize">&minus;</button>
+          <button class="ivac-close ivac-hide" title="Hide">×</button>
+        </div>
       </div>
-      <div class="ivac-body">
-        <div class="ivac-row">
-          <input type="text" class="ivac-input" id="ivac-phone" placeholder="01XXXXXXXXX">
-          <input type="password" class="ivac-input" id="ivac-password" placeholder="Enter password">
+      <div class="ivac-tabbar">
+        <button class="ivac-tab active" data-tab="run">RUN</button>
+        <button class="ivac-tab" data-tab="config">CONFIG</button>
+        <button class="ivac-tab" data-tab="files">FILES</button>
+        <button class="ivac-tab" data-tab="log">LOG</button>
+      </div>
+      <div class="ivac-scroll">
+        <!-- ============ RUN ============ -->
+        <div class="ivac-pane active" data-pane="run">
+          <div class="ivac-field-label">Device ID</div>
+          <input type="text" class="ivac-input" id="ivac-device-id" placeholder="Device ID" autocomplete="off" spellcheck="false">
+
+          <div class="ivac-row">
+            <input type="text" class="ivac-input" id="ivac-phone" placeholder="01XXXXXXXXX">
+            <input type="password" class="ivac-input" id="ivac-password" placeholder="Enter password">
+          </div>
+
+          <div class="ivac-row">
+            <button class="ivac-btn ivac-btn-green" id="ivac-btn-login">▶ Login</button>
+            <input type="text" class="ivac-input" id="ivac-otp" placeholder="OTP (6 digit)">
+            <button class="ivac-btn ivac-btn-gray" id="ivac-btn-fetch-otp" title="Fetch latest OTP now">⟳ OTP</button>
+          </div>
+
+          <div class="ivac-row">
+            <button class="ivac-btn ivac-btn-blue" id="ivac-btn-verify">✔ Verify</button>
+            <button class="ivac-btn ivac-btn-orange" id="ivac-btn-application">Application</button>
+            <button class="ivac-btn ivac-btn-red" id="ivac-btn-reset">⟲ Reset</button>
+            <input type="number" class="ivac-input" id="ivac-slot" value="1" min="1" max="10" style="max-width:50px">
+          </div>
+
+          <div class="ivac-file-wrap">
+            <label class="ivac-file-label ivac-input">
+              <input type="file" id="ivac-files" multiple style="display:none">
+              Choose Files
+            </label>
+            <button class="ivac-btn ivac-btn-blue" id="ivac-btn-add">Add</button>
+          </div>
+          <div class="ivac-file-list" id="ivac-file-list">No files added yet.</div>
+
+          <button class="ivac-btn ivac-upload-btn" id="ivac-btn-upload">⬆ Upload Selected</button>
+
+          <div class="ivac-row">
+            <select class="ivac-select" id="ivac-city">
+              <option>Dhaka</option>
+            </select>
+            <select class="ivac-select" id="ivac-center">
+              <option>IVAC, Dhaka (JFP)</option>
+            </select>
+          </div>
+
+          <div class="ivac-row">
+            <button class="ivac-btn ivac-btn-purple" id="ivac-btn-center">Select Center</button>
+            <button class="ivac-btn ivac-btn-orange" id="ivac-btn-booking">Booking</button>
+            <button class="ivac-btn ivac-btn-blue" id="ivac-btn-auto">Auto Date</button>
+          </div>
         </div>
 
-        <div class="ivac-row">
-          <button class="ivac-btn ivac-btn-green" id="ivac-btn-login">▶ Login</button>
-          <input type="text" class="ivac-input" id="ivac-otp" placeholder="OTP (6 digit)">
+        <!-- ============ CONFIG ============ -->
+        <div class="ivac-pane" data-pane="config">
+          <div class="ivac-field-label">SMS API secret (stored only in Tampermonkey storage)</div>
+          <input type="password" class="ivac-input" id="ivac-api-secret" placeholder="x-api-secret" autocomplete="off">
+          <div class="ivac-field-label">SMS API URL</div>
+          <input type="text" class="ivac-input" id="ivac-api-url" spellcheck="false">
+          <div class="ivac-field-label">Wait after Login before OTP fetch (seconds)</div>
+          <input type="number" class="ivac-input" id="ivac-otp-delay" min="0" max="120" value="5">
+          <button class="ivac-btn ivac-btn-green ivac-full" id="ivac-btn-save-config">Save settings</button>
+          <div class="ivac-note">The OTP is fetched once after Login. Use ⟳ OTP in the RUN tab to retry. Cloudflare / CAPTCHA are never bypassed - you complete them yourself.</div>
         </div>
 
-        <div class="ivac-row">
-          <button class="ivac-btn ivac-btn-blue" id="ivac-btn-verify">✔ Verify</button>
-          <button class="ivac-btn ivac-btn-orange" id="ivac-btn-application">Application</button>
-          <button class="ivac-btn ivac-btn-red" id="ivac-btn-reset">⟲ Reset</button>
-          <input type="number" class="ivac-input" id="ivac-slot" value="1" min="1" max="10" style="max-width:50px">
-        </div>
+        <!-- ============ FILES (built in code) ============ -->
+        <div class="ivac-pane" data-pane="files" id="ivac-files-pane"></div>
 
-        <div class="ivac-file-wrap">
-          <label class="ivac-file-label ivac-input">
-            <input type="file" id="ivac-files" multiple style="display:none">
-            Choose Files
-          </label>
-          <button class="ivac-btn ivac-btn-blue" id="ivac-btn-add">Add</button>
+        <!-- ============ LOG ============ -->
+        <div class="ivac-pane" data-pane="log">
+          <div class="ivac-log" id="ivac-log"></div>
+          <button class="ivac-btn ivac-btn-gray ivac-full" id="ivac-btn-clear-log">Clear log</button>
         </div>
-        <div class="ivac-file-list" id="ivac-file-list">No files added yet.</div>
-
-        <button class="ivac-btn ivac-upload-btn" id="ivac-btn-upload">⬆ Upload Selected</button>
-
-        <div class="ivac-row">
-          <select class="ivac-select" id="ivac-city">
-            <option>Dhaka</option>
-          </select>
-          <select class="ivac-select" id="ivac-center">
-            <option>IVAC, Dhaka (JFP)</option>
-          </select>
-        </div>
-
-        <div class="ivac-row">
-          <button class="ivac-btn ivac-btn-purple" id="ivac-btn-center">Select Center</button>
-          <button class="ivac-btn ivac-btn-orange" id="ivac-btn-booking">Booking</button>
-          <button class="ivac-btn ivac-btn-blue" id="ivac-btn-auto">Auto Date</button>
-        </div>
-
-        <div class="ivac-status" id="ivac-status">
-          <span>✅</span>
-          <span>All reset successfully!</span>
-        </div>
+      </div>
+      <div class="ivac-status" id="ivac-status">
+        <span>✅</span>
+        <span>All reset successfully!</span>
       </div>
     `;
+    const style = document.createElement('style');
+    style.textContent = PANEL_CSS;
+    panel.appendChild(style);
     return panel;
   }
 
+  function showTab(panel, name) {
+    panel.querySelectorAll('.ivac-tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
+    panel.querySelectorAll('.ivac-pane').forEach((p) => p.classList.toggle('active', p.dataset.pane === name));
+  }
+
+  /** Drag the panel by its header (mouse + touch). Position is remembered. */
   function makeDraggable(panel, handle) {
-    let isDragging = false;
+    let dragging = false;
     let startX = 0, startY = 0, initialLeft = 0, initialTop = 0;
 
-    handle.addEventListener('mousedown', (e) => {
-      isDragging = true;
+    handle.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('button')) return;
+      dragging = true;
       startX = e.clientX;
       startY = e.clientY;
       const rect = panel.getBoundingClientRect();
       initialLeft = rect.left;
       initialTop = rect.top;
-      panel.style.cursor = 'grabbing';
+      try { handle.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
     });
 
-    window.addEventListener('mousemove', (e) => {
-      if (!isDragging) return;
-      const dx = e.clientX - startX;
-      const dy = e.clientY - startY;
-      panel.style.left = `${Math.max(0, initialLeft + dx)}px`;
-      panel.style.top = `${Math.max(0, initialTop + dy)}px`;
+    handle.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth);
+      const maxTop = Math.max(0, window.innerHeight - 40);
+      panel.style.left = `${Math.min(maxLeft, Math.max(0, initialLeft + e.clientX - startX))}px`;
+      panel.style.top = `${Math.min(maxTop, Math.max(0, initialTop + e.clientY - startY))}px`;
     });
 
-    window.addEventListener('mouseup', () => {
-      isDragging = false;
-      panel.style.cursor = '';
-    });
+    const stop = () => {
+      if (!dragging) return;
+      dragging = false;
+      store.set('panelPos', { left: parseInt(panel.style.left, 10) || 0, top: parseInt(panel.style.top, 10) || 0 });
+    };
+    handle.addEventListener('pointerup', stop);
+    handle.addEventListener('pointercancel', stop);
+  }
+
+  async function restorePanelState(panel) {
+    const pos = await store.get('panelPos', null);
+    if (pos && Number.isFinite(pos.left) && Number.isFinite(pos.top)) {
+      panel.style.left = `${Math.min(Math.max(0, pos.left), Math.max(0, window.innerWidth - 60))}px`;
+      panel.style.top = `${Math.min(Math.max(0, pos.top), Math.max(0, window.innerHeight - 40))}px`;
+    }
+    if (await store.get('panelCollapsed', false)) panel.classList.add('ivac-collapsed');
   }
 
   function setStatus(text, type = 'ok') {
+    addLog(text, type === 'warn' ? 'warn' : type === 'error' ? 'error' : 'info');
     const status = document.getElementById('ivac-status');
     if (!status) return;
     status.className = `ivac-status ${type === 'warn' ? 'warn' : type === 'error' ? 'error' : ''}`;
     const icon = type === 'ok' ? '✅' : type === 'warn' ? '⚠️' : '❌';
-    status.innerHTML = `<span>${icon}</span><span>${text}</span>`;
+    status.innerHTML = `<span>${icon}</span><span></span>`;
+    status.lastChild.textContent = text; // textContent: messages may contain page-derived text
   }
 
   // ==========================================================
@@ -570,7 +952,8 @@
         return;
       }
       setStatus('Filling OTP...', 'warn');
-      await fillInput(CONFIG.otpInput, otp);
+      const otpEl = await fillInput(pageOtpSelector(), otp);
+      setReactInput(otpEl, otp);
       await click(CONFIG.verifyButton);
       setStatus('OTP submitted.', 'ok');
     } catch (err) {
@@ -595,6 +978,7 @@
   }
 
   function doReset() {
+    clearTimeout(otpTimer);
     document.getElementById('ivac-phone').value = '';
     document.getElementById('ivac-password').value = '';
     document.getElementById('ivac-otp').value = '';
@@ -699,15 +1083,27 @@
   // ==========================================================
   // Initialize
   // ==========================================================
-  function init() {
+  async function init() {
     if (document.getElementById('ivac-helper-panel')) return;
 
     const panel = createPanel();
     document.body.appendChild(panel);
+    buildFilesPane(document.getElementById('ivac-files-pane'));
+    renderAllLogs();
 
     makeDraggable(panel, document.getElementById('ivac-drag-handle'));
 
-    document.querySelector('#ivac-helper-panel .ivac-close').addEventListener('click', () => {
+    // Tabs
+    panel.querySelectorAll('.ivac-tab').forEach((t) => t.addEventListener('click', () => showTab(panel, t.dataset.tab)));
+
+    // Minimize
+    panel.querySelector('.ivac-min').addEventListener('click', () => {
+      const collapsed = panel.classList.toggle('ivac-collapsed');
+      store.set('panelCollapsed', collapsed);
+    });
+
+    // Hide (with a small "Helper" button to bring it back)
+    panel.querySelector('.ivac-hide').addEventListener('click', () => {
       panel.style.display = 'none';
       if (!document.getElementById('ivac-helper-toggle')) {
         const toggle = document.createElement('button');
@@ -716,7 +1112,7 @@
         toggle.textContent = 'Helper';
         toggle.style.display = 'block';
         toggle.addEventListener('click', () => {
-          panel.style.display = 'block';
+          panel.style.display = 'flex';
           toggle.remove();
         });
         document.body.appendChild(toggle);
@@ -725,16 +1121,46 @@
       }
     });
 
+    // ---- Device ID (saved with GM_setValue, restored on reload) ----
+    const deviceInput = document.getElementById('ivac-device-id');
+    deviceInput.addEventListener('input', () => {
+      settings.deviceId = deviceInput.value.trim();
+      store.set('deviceId', settings.deviceId);
+    });
+    deviceInput.addEventListener('change', () => addLog(settings.deviceId ? `Device ID saved: ${settings.deviceId}` : 'Device ID cleared.'));
+
+    // ---- CONFIG tab ----
+    document.getElementById('ivac-btn-save-config').addEventListener('click', async () => {
+      settings.apiSecret = document.getElementById('ivac-api-secret').value.trim();
+      settings.apiUrl = document.getElementById('ivac-api-url').value.trim() || DEFAULT_OTP_API;
+      const d = Number(document.getElementById('ivac-otp-delay').value);
+      settings.otpDelaySec = Number.isFinite(d) && d >= 0 ? d : 5;
+      await store.set('apiSecret', settings.apiSecret);
+      await store.set('apiUrl', settings.apiUrl);
+      await store.set('otpDelaySec', settings.otpDelaySec);
+      setStatus('Settings saved.', 'ok');
+    });
+
+    document.getElementById('ivac-btn-clear-log').addEventListener('click', () => {
+      logLines.length = 0;
+      renderAllLogs();
+    });
+
+    // ---- RUN tab ----
     document.getElementById('ivac-btn-login').addEventListener('click', () => {
       // Reset submission flag and start React-safe auto sign in
       signInSubmitted = false;
+      addLog('Login clicked.');
       const helperMobileInput = document.getElementById('ivac-phone');
       const helperPasswordInput = document.getElementById('ivac-password');
       autoSignIn(
         helperMobileInput.value.trim(),
         helperPasswordInput.value
       );
+      // After 5 s (configurable) fetch the OTP SMS once and fill the OTP field.
+      scheduleOtpFetch();
     });
+    document.getElementById('ivac-btn-fetch-otp').addEventListener('click', () => fetchAndFillOtp('manual'));
     document.getElementById('ivac-btn-verify').addEventListener('click', doVerify);
     // Submit OTP by pressing Enter in the helper OTP input
     document.getElementById('ivac-otp').addEventListener('keydown', (e) => {
@@ -752,16 +1178,32 @@
     document.getElementById('ivac-btn-booking').addEventListener('click', doBooking);
     document.getElementById('ivac-btn-auto').addEventListener('click', doAutoDate);
 
+    // ---- Load saved settings into the UI ----
+    await loadSettings();
+    deviceInput.value = settings.deviceId;
+    document.getElementById('ivac-api-secret').value = settings.apiSecret;
+    document.getElementById('ivac-api-url').value = settings.apiUrl;
+    document.getElementById('ivac-otp-delay').value = String(settings.otpDelaySec);
+    await restorePanelState(panel);
+
     log('Helper panel injected on', window.location.href);
+    addLog('Helper ready' + (settings.deviceId ? ` (Device ID: ${settings.deviceId})` : ' - set your Device ID.'));
     setStatus('Helper ready. Update CONFIG selectors if needed.', 'ok');
   }
 
+  function startInit() {
+    init().catch((err) => console.error('[IVAC Helper] init failed', err));
+  }
+
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
+    document.addEventListener('DOMContentLoaded', startInit);
   } else {
-    init();
+    startInit();
   }
 
   // Expose helpers so you can test in the browser console.
-  window.IVAC = { waitForSelector, fillInput, click, CONFIG, findLoginButton, waitForLoginButton };
+  window.IVAC = Object.assign(window.IVAC || {}, {
+    waitForSelector, fillInput, click, CONFIG, findLoginButton, waitForLoginButton,
+    parseOtp, fetchLatestOtp, fetchAndFillOtp, applyFiles, addLog,
+  });
 })();
