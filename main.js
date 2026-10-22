@@ -100,7 +100,9 @@
   // ==========================================================
   const OTP_LENGTH = 6;
   const NUMBER_WORDS = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
-  const WORD_RUN_RE = /(?:\b(?:zero|one|two|three|four|five|six|seven|eight|nine)\b[\s,.\-–—_]*)+/gi;
+  // Number words separated by space, comma, dot, dash or underscore ("Nine_Two_Three_Four_Three_Eight").
+  // Lookarounds instead of \b because "_" counts as a word character for \b.
+  const WORD_RUN_RE = /(?:(?<![a-z])(?:zero|one|two|three|four|five|six|seven|eight|nine)(?![a-z])[\s,.\-\u2013\u2014_]*)+/gi;
 
   /**
    * Extract an OTP from SMS text.
@@ -155,11 +157,19 @@
     } catch (e) {
       texts = [res.text]; // plain-text response
     }
+    // Age of the SMS (if the API gives received_at as epoch seconds/ms) - helps spot an old OTP.
+    let ageSec = null;
+    try {
+      const data = JSON.parse(res.text);
+      const ts = Number(data && (data.received_at || data.receivedAt || data.timestamp));
+      if (Number.isFinite(ts) && ts > 0) ageSec = Math.round(Date.now() / 1000 - (ts > 1e12 ? ts / 1000 : ts));
+    } catch (e) { /* plain-text response */ }
+
     for (const t of texts) {
       const otp = parseOtp(t);
-      if (otp) return { otp, status: res.status };
+      if (otp) return { otp, status: res.status, ageSec };
     }
-    return { otp: '', status: res.status };
+    return { otp: '', status: res.status, ageSec };
   }
 
   /** CSS selector for the IVAC page's own OTP input (never the helper's input). */
@@ -185,7 +195,7 @@
     try {
       addLog(`OTP fetch (${source}) for device "${settings.deviceId}"...`);
       setStatus('Fetching OTP...', 'warn');
-      const { otp } = await fetchLatestOtp();
+      const { otp, ageSec } = await fetchLatestOtp();
       if (!otp) {
         addLog('No OTP found in the latest SMS. Enter it manually or press the OTP fetch button again.', 'warn');
         setStatus('No OTP found yet - enter manually or retry.', 'warn');
@@ -196,6 +206,9 @@
       const pageOtp = findPageOtpInput();
       if (pageOtp) setReactInput(pageOtp, otp);
       addLog(`OTP filled (${otp.length} digits)${pageOtp ? ' in helper + page field' : ' in helper field'}. Press Verify.`);
+      if (ageSec !== null && ageSec > 120) {
+        addLog(`Note: the latest SMS is ${ageSec}s old - it may be a previous OTP. Use Resend OTP, then press the OTP fetch button again once the new SMS arrives.`, 'warn');
+      }
       setStatus('OTP filled. Press Verify.', 'ok');
     } catch (err) {
       addLog('OTP fetch failed: ' + err.message, 'error');
