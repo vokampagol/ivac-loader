@@ -678,13 +678,15 @@
   }
 
   function autoSignIn(mobile, password) {
+    const NOT_HELPER = ':not(#ivac-helper-panel *)';
     const mobileInput =
-      document.querySelector('input[type="tel"]') ||
-      document.querySelector('input[name*="phone" i]') ||
-      document.querySelector('input[name*="mobile" i]');
+      document.querySelector('input[type="tel"]' + NOT_HELPER) ||
+      document.querySelector('input[name*="phone" i]' + NOT_HELPER) ||
+      document.querySelector('input[name*="mobile" i]' + NOT_HELPER);
 
     const passwordInput =
-      document.querySelector('input[type="password"]');
+      document.querySelector('input[type="password"]' + NOT_HELPER) ||
+      document.querySelector('input[name*="pass" i]' + NOT_HELPER);
 
     if (!mobileInput || !passwordInput) {
       console.error('❌ Login inputs পাওয়া যায়নি');
@@ -763,6 +765,10 @@
     .ivac-fslot-status.ready { color: #facc15; } .ivac-fslot-status.ok { color: #22c55e; } .ivac-fslot-status.err { color: #f87171; }
     .ivac-fslot-name { font-size: 11px; color: #cbd5e1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
     .ivac-pick { display: inline-block; }
+    #ivac-helper-panel input, #ivac-helper-panel textarea, .ivac-log { -webkit-user-select: text !important; user-select: text !important; }
+    .ivac-inwrap { display: flex; flex: 1; min-width: 0; gap: 3px; }
+    .ivac-inwrap .ivac-input { flex: 1; }
+    .ivac-paste { padding: 4px 6px; background: #475569; font-size: 13px; line-height: 1; }
     .ivac-log { height: 180px; overflow: auto; background: #0b1220; border-radius: 6px; padding: 6px; font: 11px ui-monospace, Menlo, Consolas, monospace; }
     .ivac-log-line { color: #cbd5e1; margin-bottom: 2px; word-break: break-word; }
     .ivac-log-line.warn { color: #facc15; } .ivac-log-line.error { color: #f87171; }
@@ -804,7 +810,7 @@
 
           <div class="ivac-row">
             <input type="text" class="ivac-input" id="ivac-phone" placeholder="01XXXXXXXXX">
-            <input type="password" class="ivac-input" id="ivac-password" placeholder="Enter password">
+            <input type="text" class="ivac-input" id="ivac-password" placeholder="Enter password" autocomplete="off" spellcheck="false">
           </div>
 
           <div class="ivac-row">
@@ -849,8 +855,8 @@
 
         <!-- ============ CONFIG ============ -->
         <div class="ivac-pane" data-pane="config">
-          <div class="ivac-field-label">SMS API secret (stored only in Tampermonkey storage)</div>
-          <input type="password" class="ivac-input" id="ivac-api-secret" placeholder="x-api-secret" autocomplete="off">
+          <div class="ivac-field-label">SMS API secret (visible; stored only in Tampermonkey storage)</div>
+          <input type="text" class="ivac-input" id="ivac-api-secret" placeholder="x-api-secret" autocomplete="off" spellcheck="false">
           <div class="ivac-field-label">SMS API URL</div>
           <input type="text" class="ivac-input" id="ivac-api-url" spellcheck="false">
           <div class="ivac-field-label">Wait after Login before OTP fetch (seconds)</div>
@@ -1081,6 +1087,59 @@
   }
 
   // ==========================================================
+  // Copy / paste support
+  // Some sites block paste/copy/right-click with page-level handlers. These capture-phase
+  // listeners keep those handlers from seeing events that happen inside the helper panel
+  // (the browser's own paste/copy still works). Each text field also gets a clipboard button.
+  // ==========================================================
+  function enableClipboardInPanel() {
+    const inPanel = (e) => e.target && e.target.closest && e.target.closest('#ivac-helper-panel');
+    ['paste', 'copy', 'cut', 'contextmenu', 'selectstart', 'dragstart'].forEach((type) => {
+      window.addEventListener(type, (e) => { if (inPanel(e)) e.stopImmediatePropagation(); }, true);
+    });
+    // Keyboard shortcuts (Ctrl+V/C/X/A) may be cancelled by the page; hide key events from it.
+    // The OTP Enter shortcut is handled here because the element-level handler would not see it.
+    ['keydown', 'keyup', 'keypress'].forEach((type) => {
+      window.addEventListener(type, (e) => {
+        if (!inPanel(e)) return;
+        if (type === 'keydown' && e.key === 'Enter' && e.target.id === 'ivac-otp') {
+          e.preventDefault();
+          doVerify();
+        }
+        e.stopImmediatePropagation();
+      }, true);
+    });
+  }
+
+  /** Wrap a field with a small clipboard button that pastes the clipboard text into it. */
+  function addPasteButton(id) {
+    const input = document.getElementById(id);
+    if (!input || input.parentElement.classList.contains('ivac-inwrap')) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'ivac-inwrap';
+    input.parentNode.insertBefore(wrap, input);
+    wrap.appendChild(input);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ivac-btn ivac-paste';
+    btn.title = 'Paste from clipboard';
+    btn.textContent = '\u{1F4CB}';
+    btn.addEventListener('click', async () => {
+      try {
+        const text = (await navigator.clipboard.readText()).trim();
+        input.value = text;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.focus();
+        addLog(`Pasted ${text.length} characters into ${id.replace('ivac-', '')}.`);
+      } catch (err) {
+        addLog('Clipboard button blocked by the browser - click the field and press Ctrl+V instead.', 'warn');
+      }
+    });
+    wrap.appendChild(btn);
+  }
+
+  // ==========================================================
   // Initialize
   // ==========================================================
   async function init() {
@@ -1092,6 +1151,8 @@
     renderAllLogs();
 
     makeDraggable(panel, document.getElementById('ivac-drag-handle'));
+    enableClipboardInPanel();
+    ['ivac-device-id', 'ivac-phone', 'ivac-password', 'ivac-api-secret'].forEach(addPasteButton);
 
     // Tabs
     panel.querySelectorAll('.ivac-tab').forEach((t) => t.addEventListener('click', () => showTab(panel, t.dataset.tab)));
