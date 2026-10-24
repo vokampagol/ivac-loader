@@ -91,6 +91,12 @@
     settings.apiUrl = String(await store.get('apiUrl', DEFAULT_OTP_API)) || DEFAULT_OTP_API;
     const d = Number(await store.get('otpDelaySec', 5));
     settings.otpDelaySec = Number.isFinite(d) && d >= 0 ? d : 5;
+    const num = async (key, def, min) => { const x = Number(await store.get(key, def)); return Number.isFinite(x) && x >= min ? x : def; };
+    autoCfg.dwellSec = await num('dwellSec', 15, 1);
+    autoCfg.maxMonths = await num('maxMonths', 3, 1);
+    autoCfg.cyclePauseSec = await num('cyclePauseSec', 60, 5);
+    autoCfg.maxCycles = await num('maxCycles', 10, 1);
+    autoCfg.autoContinue = Boolean(await store.get('autoContinue', false));
     if (!HAS_GM_STORE) addLog('GM storage not available - settings are kept in browser localStorage.', 'warn');
   }
 
@@ -349,6 +355,46 @@
   }
 
   function buildFilesPane(pane) {
+    // --- easy mode: one picker (or drag & drop) for all PDFs, optional one-click START ---
+    const multi = document.createElement('input');
+    multi.type = 'file';
+    multi.multiple = true;
+    multi.accept = 'application/pdf,.pdf';
+    multi.id = 'ivac-multi-files';
+    multi.style.display = 'none';
+    let startAfterPick = false;
+    multi.addEventListener('change', () => {
+      if (multi.files && multi.files.length && autoAssignFiles(multi.files) && (startAfterPick || document.getElementById('ivac-chk-autostart').checked)) autoStart('files selected');
+      startAfterPick = false;
+      multi.value = '';
+    });
+    const easy = document.createElement('div');
+    easy.className = 'ivac-grid2';
+    const pickBtn = document.createElement('button');
+    pickBtn.className = 'ivac-btn ivac-btn-blue';
+    pickBtn.textContent = '\u{1F4C2} Select PDFs';
+    pickBtn.addEventListener('click', () => { startAfterPick = false; multi.click(); });
+    const pickStart = document.createElement('button');
+    pickStart.className = 'ivac-btn ivac-btn-green';
+    pickStart.id = 'ivac-btn-pick-start';
+    pickStart.textContent = '\u25B6 Select PDFs & START';
+    pickStart.addEventListener('click', () => { startAfterPick = true; multi.click(); });
+    easy.append(pickBtn, pickStart);
+    const drop = document.createElement('div');
+    drop.className = 'ivac-drop';
+    drop.textContent = 'or drop all PDFs here (name with "primary" = primary file)';
+    drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+    drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+    drop.addEventListener('drop', (e) => {
+      e.preventDefault();
+      drop.classList.remove('over');
+      if (e.dataTransfer && e.dataTransfer.files.length && autoAssignFiles(e.dataTransfer.files) && document.getElementById('ivac-chk-autostart').checked) autoStart('files dropped');
+    });
+    const chk = document.createElement('label');
+    chk.className = 'ivac-note';
+    chk.innerHTML = '<input type="checkbox" id="ivac-chk-autostart"> Start automation right after files are selected';
+    pane.append(multi, easy, drop, chk);
+
     FILE_SLOTS.forEach((slot) => {
       const row = document.createElement('div');
       row.className = 'ivac-fslot';
@@ -405,7 +451,7 @@
     apply.className = 'ivac-btn ivac-btn-teal ivac-full';
     apply.id = 'ivac-btn-apply-files';
     apply.textContent = 'APPLY FILES';
-    apply.addEventListener('click', applyFiles);
+    apply.addEventListener('click', () => uploadSequence());
     const note = document.createElement('div');
     note.className = 'ivac-note';
     note.textContent = 'Files stay in this tab only (memory). Nothing is saved or submitted automatically.';
@@ -778,6 +824,13 @@
     .ivac-fslot-status.ready { color: #facc15; } .ivac-fslot-status.ok { color: #22c55e; } .ivac-fslot-status.err { color: #f87171; }
     .ivac-fslot-name { font-size: 11px; color: #cbd5e1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
     .ivac-pick { display: inline-block; }
+    .ivac-ctrl { display: flex; gap: 6px; align-items: center; padding: 6px 10px; background: #0b1220; border-bottom: 1px solid rgba(148,163,184,0.15); }
+    .ivac-ctrl .ivac-btn { padding: 6px 10px; }
+    .ivac-btn:disabled { opacity: 0.4; cursor: default; }
+    .ivac-auto-state { flex: 1; min-width: 0; font-size: 11px; color: #94a3b8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+    .ivac-drop { border: 1px dashed rgba(148,163,184,0.5); border-radius: 8px; padding: 10px; text-align: center; font-size: 12px; color: #94a3b8; }
+    .ivac-drop.over { border-color: #3b82f6; color: #fff; background: rgba(59,130,246,0.12); }
+    .ivac-log-line.good { color: #4ade80; font-weight: 600; }
     #ivac-helper-panel input, #ivac-helper-panel textarea, .ivac-log { -webkit-user-select: text !important; user-select: text !important; }
     .ivac-inwrap { display: flex; flex: 1; min-width: 0; gap: 3px; }
     .ivac-inwrap .ivac-input { flex: 1; }
@@ -790,7 +843,7 @@
     .ivac-status.warn { color: #facc15; } .ivac-status.error { color: #f87171; }
     .ivac-toggle { position: fixed; top: 80px; left: 20px; z-index: 2147482999; padding: 8px 12px; border-radius: 6px; background: #3b82f6;
       color: #fff; border: none; cursor: pointer; font-weight: 600; display: none; }
-    #ivac-helper-panel.ivac-collapsed .ivac-tabbar, #ivac-helper-panel.ivac-collapsed .ivac-scroll,
+    #ivac-helper-panel.ivac-collapsed .ivac-tabbar, #ivac-helper-panel.ivac-collapsed .ivac-scroll, #ivac-helper-panel.ivac-collapsed .ivac-ctrl,
     #ivac-helper-panel.ivac-collapsed .ivac-status { display: none; }
     @media (max-width: 480px) { #ivac-helper-panel { width: calc(100vw - 16px); left: 8px !important; } .ivac-grid2 { grid-template-columns: 1fr; } }
   `;
@@ -808,6 +861,11 @@
           <button class="ivac-close ivac-min" title="Minimize">&minus;</button>
           <button class="ivac-close ivac-hide" title="Hide">×</button>
         </div>
+      </div>
+      <div class="ivac-ctrl">
+        <button class="ivac-btn ivac-btn-green" id="ivac-btn-start" title="Start the automatic booking steps">&#9654; START</button>
+        <button class="ivac-btn ivac-btn-red" id="ivac-btn-stop" title="Stop automation" disabled>&#9632; STOP</button>
+        <span class="ivac-auto-state" id="ivac-auto-state">Idle</span>
       </div>
       <div class="ivac-tabbar">
         <button class="ivac-tab active" data-tab="run">RUN</button>
@@ -874,6 +932,15 @@
           <input type="text" class="ivac-input" id="ivac-api-url" spellcheck="false">
           <div class="ivac-field-label">Wait after Login before OTP fetch (seconds)</div>
           <input type="number" class="ivac-input" id="ivac-otp-delay" min="0" max="120" value="5">
+          <div class="ivac-field-label">Automation: wait on each date (seconds)</div>
+          <input type="number" class="ivac-input" id="ivac-cfg-dwell" min="1" max="120" value="15">
+          <div class="ivac-grid2">
+            <div><div class="ivac-field-label">Months to scan</div><input type="number" class="ivac-input" id="ivac-cfg-months" min="1" max="12" value="3"></div>
+            <div><div class="ivac-field-label">Rounds (max)</div><input type="number" class="ivac-input" id="ivac-cfg-cycles" min="1" max="100" value="10"></div>
+          </div>
+          <div class="ivac-field-label">Pause between rounds (seconds)</div>
+          <input type="number" class="ivac-input" id="ivac-cfg-pause" min="5" max="3600" value="60">
+          <label class="ivac-note"><input type="checkbox" id="ivac-cfg-autocontinue"> Auto-click "Continue Booking" when a slot is found (off = you click it)</label>
           <button class="ivac-btn ivac-btn-green ivac-full" id="ivac-btn-save-config">Save settings</button>
           <div class="ivac-note">The OTP is fetched once after Login. Use ⟳ OTP in the RUN tab to retry. Cloudflare / CAPTCHA are never bypassed - you complete them yourself.</div>
         </div>
@@ -884,7 +951,10 @@
         <!-- ============ LOG ============ -->
         <div class="ivac-pane" data-pane="log">
           <div class="ivac-log" id="ivac-log"></div>
-          <button class="ivac-btn ivac-btn-gray ivac-full" id="ivac-btn-clear-log">Clear log</button>
+          <div class="ivac-grid2">
+            <button class="ivac-btn ivac-btn-gray" id="ivac-btn-inspect" title="Log the buttons, file inputs and calendar cells found on this page">Inspect page</button>
+            <button class="ivac-btn ivac-btn-gray" id="ivac-btn-clear-log">Clear log</button>
+          </div>
         </div>
       </div>
       <div class="ivac-status" id="ivac-status">
@@ -1100,6 +1170,636 @@
   }
 
   // ==========================================================
+  // AUTOMATION (START / STOP)
+  // Walks the normal booking pages for you:
+  //   /signin -> /verify-login-phone-otp -> / -> /appointment/notice -> /appointment/file-upload
+  //   -> /appointment/mission -> /appointment/time-slot (calendar scan)
+  // Rules: Cloudflare is never bypassed (we wait until YOU/your browser pass it), every date is
+  // given `dwellSec` seconds (default 15) before moving on, and it STOPS when a slot is found -
+  // payment / final booking is left to you unless "auto-click Continue Booking" is ticked.
+  // ==========================================================
+  const SITE_HOME = 'https://appointment.ivacbd.com/';
+  const autoCfg = { dwellSec: 15, maxMonths: 3, cyclePauseSec: 60, maxCycles: 10, autoContinue: false };
+  const auto = { running: false, busy: false, timer: null, lastPath: null, visits: {}, cycle: 0, homeJumps: 0, lastSave: 0 };
+
+  const MONTH_RE = /(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})/i;
+  const NO_SLOT_RE = /temporarily held|no (available )?slots?|slots? (is |are )?(not available|unavailable|full)|fully booked|sold out|no appointment|not available/i;
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const stopped = () => !auto.running;
+
+  /** Poll fn() until it returns something truthy (or timeout / abort). */
+  async function waitFor(fn, timeout = 10000, interval = 300, abort = null) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeout) {
+      if (abort && abort()) return null;
+      let v = null;
+      try { v = fn(); } catch (e) { v = null; }
+      if (v) return v;
+      await sleep(interval);
+    }
+    return null;
+  }
+
+  /** sleep that returns false early when automation is stopped. */
+  async function sleepAbortable(ms, abort = stopped) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < ms) {
+      if (abort()) return false;
+      await sleep(Math.min(250, ms - (Date.now() - t0)));
+    }
+    return true;
+  }
+
+  const pagePath = () => (location.pathname.replace(/\/+$/, '') || '/').toLowerCase();
+  const textOf = (el) => ((el.innerText || el.textContent || el.value || '') + '').replace(/\s+/g, ' ').trim();
+
+  function isVisible(el) {
+    if (!el || !el.getClientRects || !el.getClientRects().length) return false;
+    const cs = getComputedStyle(el);
+    return cs.visibility !== 'hidden' && cs.display !== 'none';
+  }
+
+  /** Disabled in the HTML sense OR visually faded (the site fades its buttons while Cloudflare verifies). */
+  function isDisabledEl(el) {
+    if (!el) return true;
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return true;
+    if (typeof el.className === 'string' && /\bdisabled\b/i.test(el.className)) return true;
+    const cs = getComputedStyle(el);
+    return cs.pointerEvents === 'none' || cs.cursor === 'not-allowed' || parseFloat(cs.opacity) < 0.85;
+  }
+
+  /** First visible button/link whose text matches re (outside the helper panel). */
+  function findClickable(re, { enabledOnly = true } = {}) {
+    const els = document.querySelectorAll('button, a, [role="button"], input[type="submit"], input[type="button"]');
+    for (const el of els) {
+      if (el.closest('#ivac-helper-panel') || !isVisible(el)) continue;
+      if (!re.test(textOf(el))) continue;
+      if (enabledOnly && isDisabledEl(el)) continue;
+      return el;
+    }
+    return null;
+  }
+
+  const cloudflareOkOrAbsent = () => {
+    const t = document.querySelector('input[name="cf-turnstile-response"]');
+    return !t || Boolean(t.value && t.value.trim());
+  };
+
+  function setAutoState(text) {
+    const el = document.getElementById('ivac-auto-state');
+    if (el) { el.textContent = text; el.title = text; }
+  }
+
+  function updateAutoUi() {
+    const start = document.getElementById('ivac-btn-start');
+    const stop = document.getElementById('ivac-btn-stop');
+    if (start) start.disabled = auto.running;
+    if (stop) stop.disabled = !auto.running;
+    if (!auto.running) setAutoState('Idle');
+  }
+
+  /** Click a matching button at most once per retryMs for this page visit. */
+  async function clickStep(key, re, retryMs = 7000) {
+    if (Date.now() - (auto.visits[key] || 0) < retryMs) return false;
+    const el = findClickable(re);
+    if (!el) return false;
+    auto.visits[key] = Date.now();
+    addLog(`Click: "${textOf(el).slice(0, 40)}"`);
+    await performNativeClick(el);
+    return true;
+  }
+
+  function beep() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      [0, 0.25, 0.5].forEach((t) => {
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.frequency.value = 880;
+        o.connect(g);
+        g.connect(ctx.destination);
+        g.gain.setValueAtTime(0.2, ctx.currentTime + t);
+        o.start(ctx.currentTime + t);
+        o.stop(ctx.currentTime + t + 0.18);
+      });
+    } catch (e) { /* audio blocked - ignore */ }
+  }
+
+  // ---------------- start / stop ----------------
+  async function autoStart(source = 'button') {
+    if (auto.running) return;
+    auto.running = true;
+    auto.cycle = 0;
+    auto.homeJumps = 0;
+    auto.lastPath = null;
+    auto.visits = {};
+    await store.set('autoRun', true);
+    await store.set('autoActive', Date.now());
+    addLog(`AUTOMATION started (${source}).`);
+    updateAutoUi();
+    clearInterval(auto.timer);
+    auto.timer = setInterval(tick, 1000);
+    tick();
+  }
+
+  function autoStop(reason = 'stopped') {
+    const was = auto.running;
+    auto.running = false;
+    clearInterval(auto.timer);
+    store.set('autoRun', false);
+    if (was) addLog(`AUTOMATION stopped: ${reason}.`);
+    updateAutoUi();
+  }
+
+  async function tick() {
+    if (!auto.running || auto.busy) return;
+    auto.busy = true;
+    try {
+      const p = pagePath();
+      if (p !== auto.lastPath) {
+        auto.lastPath = p;
+        auto.visits = {};
+        addLog(`Page: ${p}`);
+      }
+      if (Date.now() - auto.lastSave > 10000) { auto.lastSave = Date.now(); store.set('autoActive', Date.now()); }
+      await autoStep(p);
+    } catch (err) {
+      addLog('Automation error: ' + err.message, 'error');
+      console.error(err);
+    } finally {
+      auto.busy = false;
+    }
+  }
+
+  async function autoStep(p) {
+    if (p === '/') return stepHome();
+    if (p === '/signin') return stepSignin();
+    if (p.startsWith('/verify')) return stepVerifyOtp();
+    if (p === '/appointment/notice') return stepNotice();
+    if (p === '/appointment/file-upload') return stepFileUpload();
+    if (p === '/appointment/mission') return stepMission();
+    if (p === '/appointment/time-slot') return stepTimeSlot();
+    return stepUnknown(p);
+  }
+
+  // ---------------- step handlers ----------------
+  function navigateHome(why) {
+    auto.homeJumps++;
+    addLog(`Opening the IVAC start page (${why}).`);
+    store.set('autoRun', true);
+    store.set('autoActive', Date.now());
+    location.assign(SITE_HOME);
+  }
+
+  function stepUnknown(p) {
+    const v = auto.visits;
+    setAutoState(`unknown page ${p}`);
+    if (!v.since) { v.since = Date.now(); addLog(`Not a known booking page (${p}).`, 'warn'); }
+    if (Date.now() - v.since < 10000) return;
+    if (auto.homeJumps >= 2) { autoStop('stuck on an unknown page'); return; }
+    navigateHome('unknown page');
+  }
+
+  async function stepHome() {
+    setAutoState('home');
+    if (await clickStep('take', /take your appointment/i)) return;
+    // Not logged in: the "Sign In" button leads to the login page.
+    if (!findClickable(/take your appointment/i)) await clickStep('signin', /^sign in$/i);
+  }
+
+  async function stepSignin() {
+    const v = auto.visits;
+    setAutoState('sign in');
+    const phone = document.getElementById('ivac-phone').value.trim();
+    const pass = document.getElementById('ivac-password').value;
+    if (!phone || !pass) {
+      if (!v.warned) { v.warned = true; addLog('Sign-in page: fill phone + password in the RUN tab, automation continues by itself.', 'warn'); }
+      return;
+    }
+    if (v.loginClicked) return;
+    v.loginClicked = true;
+    document.getElementById('ivac-btn-login').click(); // same path as pressing Login: fills fields, waits for Cloudflare, schedules the OTP fetch
+  }
+
+  async function stepVerifyOtp() {
+    const v = auto.visits;
+    setAutoState('OTP page');
+    if (!v.since) v.since = Date.now();
+    const helperOtp = document.getElementById('ivac-otp');
+    if (!helperOtp.value && !otpBusy && Date.now() - v.since > settings.otpDelaySec * 1000 && !v.fetched) {
+      v.fetched = true;
+      await fetchAndFillOtp('auto');
+    }
+    const otp = helperOtp.value.trim();
+    if (otp.length !== OTP_LENGTH) return;
+    const pageOtp = findPageOtpInput();
+    if (pageOtp && pageOtp.value !== otp) setReactInput(pageOtp, otp);
+    if (!cloudflareOkOrAbsent()) { setAutoState('waiting for Cloudflare check'); return; }
+    await clickStep('verify', /verify|submit|login/i, 8000).catch(() => {});
+  }
+
+  async function stepNotice() {
+    setAutoState('notice page');
+    await clickStep('next', /next step/i, 6000);
+  }
+
+  async function stepFileUpload() {
+    const v = auto.visits;
+    const queued = FILE_SLOTS.some((s) => slotFiles[s.key]);
+    if (!v.uploadDone) {
+      if (!queued) {
+        setAutoState('waiting for PDF files');
+        if (!v.noFiles) { v.noFiles = true; addLog('File-upload page: choose your PDFs in the FILES tab (Select PDFs & START).', 'warn'); }
+        return;
+      }
+      setAutoState('uploading files');
+      const ok = await uploadSequence({ abort: stopped });
+      if (!auto.running) return;
+      if (!ok) {
+        v.fail = (v.fail || 0) + 1;
+        if (v.fail >= 3) { autoStop('file upload failed 3 times'); return; }
+        await sleep(2000);
+        return;
+      }
+      v.uploadDone = true;
+    }
+    if (await clickStep('save', /save\s*(&|and)\s*continue/i, 5000)) return;
+    if (findClickable(/save\s*(&|and)\s*continue/i)) return;
+    if (!cloudflareOkOrAbsent()) { setAutoState('waiting for Cloudflare check'); return; }
+    setAutoState('confirming applicants');
+    await clickStep('confirm', /confirm all information/i, 6000);
+  }
+
+  async function stepMission() {
+    const v = auto.visits;
+    setAutoState('mission / center');
+    const body = textOf(document.body);
+    const unselected = /Select your IVAC center\s*Select IVAC center/i.test(body);
+    if (unselected) {
+      // Open the center list once, then take the option only when exactly one center is offered.
+      if (!v.opened) {
+        const trigger = [...document.querySelectorAll('div,button,span')].find((e) => !e.closest('#ivac-helper-panel') && e.children.length === 0 && /^Select IVAC center$/i.test(textOf(e)));
+        if (trigger) { v.opened = true; addLog('Opening the IVAC center list.'); await performNativeClick(trigger.closest('button,[role="button"],div') || trigger); await sleep(600); }
+      }
+      const options = [...document.querySelectorAll('div,li,button,span')].filter((e) => !e.closest('#ivac-helper-panel') && e.children.length === 0 && /^IVAC,/i.test(textOf(e)) && isVisible(e));
+      if (options.length === 1 && !v.picked) {
+        v.picked = true;
+        addLog(`Only one center offered: ${textOf(options[0])} - selecting it.`);
+        await performNativeClick(options[0]);
+        await sleep(600);
+      } else if (options.length > 1 && !v.multi) {
+        v.multi = true;
+        addLog('Several IVAC centers offered - choose yours manually; automation continues afterwards.', 'warn');
+      }
+      return;
+    }
+    await clickStep('mission', /confirm mission/i, 6000);
+  }
+
+  // ---------------- file upload (one file at a time, waits for the applicant counter) ----------------
+  const applicantCount = () => {
+    const m = textOf(document.body).match(/Total number of applicants:\s*(\d+)/i);
+    return m ? Number(m[1]) : null;
+  };
+
+  /** Every <input type=file> of the page, hidden ones included (the site hides the real input behind a drop-zone). */
+  function getAllFileInputs() {
+    return [...document.querySelectorAll(CONFIG.fileInput)].filter((el) => !el.closest('#ivac-helper-panel') && !el.disabled);
+  }
+
+  /**
+   * Upload the selected PDFs in order: primary first, then secondary 1..3.
+   * After every file we wait until "Total number of applicants" goes up. Never submits anything.
+   */
+  async function uploadSequence(opts = {}) {
+    const abort = opts.abort || (() => false);
+    const queue = FILE_SLOTS.filter((s) => slotFiles[s.key]);
+    if (!queue.length) { setStatus('No files selected in the FILES tab.', 'warn'); return false; }
+
+    for (let qi = 0; qi < queue.length; qi++) {
+      if (abort()) return false;
+      const slot = queue[qi];
+      const entry = slotFiles[slot.key];
+      const before = applicantCount();
+      if (before !== null && before > qi) {
+        entry.status = 'Applied (already on page)';
+        renderSlot(slot.key);
+        addLog(`${slot.label}: already uploaded (${before} applicant(s) on page).`);
+        continue;
+      }
+      const input = await waitFor(() => {
+        const all = getAllFileInputs();
+        return all[qi] || all[all.length - 1] || null;
+      }, 15000, 300, abort);
+      if (!input) {
+        entry.status = 'Error - no file input on page';
+        renderSlot(slot.key);
+        addLog(`${slot.label}: no file input found on this page.`, 'warn');
+        setStatus('No file input found on the page.', 'warn');
+        return false;
+      }
+      entry.status = 'Uploading...';
+      renderSlot(slot.key);
+      addLog(`Uploading ${slot.label}: ${entry.file.name}`);
+      putFilesInInput(input, [entry.file]);
+
+      let confirmed = false;
+      const t0 = Date.now();
+      // A page that never shows an applicant counter cannot confirm anything: do not wait the full 20 s.
+      const maxWait = before === null ? 12000 : 20000;
+      while (Date.now() - t0 < maxWait) {
+        if (abort()) return false;
+        const c = applicantCount();
+        if (c !== null && c > qi) { confirmed = true; break; }
+        await sleep(400);
+      }
+      if (!confirmed && applicantCount() === null) {
+        // The page shows no counter at all: give the upload a moment and carry on.
+        await sleep(2500);
+        confirmed = true;
+        addLog(`${slot.label}: page shows no applicant counter - assuming upload accepted.`, 'warn');
+      }
+      if (!confirmed) {
+        entry.status = 'Error - not accepted by the page';
+        renderSlot(slot.key);
+        addLog(`${slot.label}: the page did not add the applicant within 20 s (check size <= 500KB, PDF only).`, 'error');
+        setStatus(`${slot.label}: upload not accepted.`, 'error');
+        return false;
+      }
+      entry.status = 'Applied';
+      renderSlot(slot.key);
+      await sleep(800);
+    }
+    setStatus('All files uploaded. Check the page, then continue.', 'ok');
+    return true;
+  }
+
+  /**
+   * One picker for everything: file whose name contains "primary" -> primary, the others (A-Z) -> secondary 1..3.
+   * Without "primary" in any name the first file is the primary.
+   */
+  function autoAssignFiles(fileList) {
+    const files = [...fileList].filter(isPdf);
+    const skipped = fileList.length - files.length;
+    if (skipped) addLog(`${skipped} non-PDF file(s) ignored.`, 'warn');
+    if (!files.length) { setStatus('No PDF selected.', 'warn'); return false; }
+    let primary = files.find((f) => /primary/i.test(f.name)) || files[0];
+    const others = files.filter((f) => f !== primary).sort((a, b) => a.name.localeCompare(b.name));
+    if (others.length > 3) addLog(`Only 3 secondary files are supported - ignoring ${others.length - 3}.`, 'warn');
+    clearAllSlots();
+    setSlotFile('primary', primary);
+    others.slice(0, 3).forEach((f, i) => setSlotFile(`sec${i + 1}`, f));
+    return true;
+  }
+
+  // ---------------- calendar (/appointment/time-slot) ----------------
+  function alphaOf(c) {
+    if (!c || c === 'transparent') return 0;
+    const m = c.match(/\(([^)]+)\)/);
+    if (!m) return 1;
+    const p = m[1].split(/[,\s/]+/).filter(Boolean);
+    return p.length >= 4 ? parseFloat(p[3]) : 1;
+  }
+
+  /** Circle outline or filled background = the site's "bookable" styling. */
+  function hasPaint(el) {
+    const cs = getComputedStyle(el);
+    const bw = parseFloat(cs.borderTopWidth) || 0;
+    const border = bw >= 1 && cs.borderTopStyle !== 'none' && alphaOf(cs.borderTopColor) > 0.1;
+    return border || alphaOf(cs.backgroundColor) > 0.05;
+  }
+
+  function findMonthLabel() {
+    const els = document.querySelectorAll('div,span,p,h1,h2,h3,h4,button');
+    for (const e of els) {
+      if (e.closest('#ivac-helper-panel') || e.children.length) continue;
+      const t = (e.textContent || '').trim();
+      if (t.length < 25 && MONTH_RE.test(t) && isVisible(e)) return e;
+    }
+    return null;
+  }
+
+  function dayCellsIn(root) {
+    const out = [];
+    const seen = new Set();
+    root.querySelectorAll('*').forEach((leaf) => {
+      if (leaf.children.length) return;
+      const t = (leaf.textContent || '').trim();
+      if (!/^\d{1,2}$/.test(t)) return;
+      const n = Number(t);
+      if (n < 1 || n > 31 || !isVisible(leaf)) return;
+      const el = leaf.closest('button,[role="gridcell"],[role="button"],td') || leaf;
+      if (seen.has(el)) return;
+      seen.add(el);
+      out.push({ n, el, leaf });
+    });
+    return out;
+  }
+
+  function getCalendar() {
+    const label = findMonthLabel();
+    if (!label) return null;
+    let root = label.parentElement;
+    while (root && root !== document.body) {
+      const days = dayCellsIn(root);
+      if (days.length >= 28) return { root, label, days };
+      root = root.parentElement;
+    }
+    return null;
+  }
+
+  /** Elements that make up the "circle" around a day number: the cell, its number and small wrappers. */
+  function circleChain(cell) {
+    const chain = [];
+    let e = cell.leaf;
+    while (e && chain.length < 4) {
+      const r = e.getBoundingClientRect();
+      if (r.width > 90 || r.height > 90) break;
+      chain.push(e);
+      if (e === cell.el) { if (e.parentElement) chain.push(e.parentElement); break; }
+      e = e.parentElement;
+    }
+    return chain.filter((x) => {
+      const r = x.getBoundingClientRect();
+      return r.width <= 90 && r.height <= 90;
+    });
+  }
+
+  /** Only dates that have the circle/filled styling and are not disabled. Plain grey numbers are skipped. */
+  function isAvailableDay(cell) {
+    const chain = circleChain(cell);
+    if (!chain.length) return false;
+    for (const x of chain) {
+      if (x.disabled || x.getAttribute('aria-disabled') === 'true') return false;
+      if (/disabled|unavailable|past|outside/i.test(typeof x.className === 'string' ? x.className : '')) return false;
+      const cs = getComputedStyle(x);
+      if (cs.pointerEvents === 'none' || cs.cursor === 'not-allowed') return false;
+    }
+    return chain.some(hasPaint);
+  }
+
+  function isSelectedCell(cell) {
+    return circleChain(cell).some((x) => x.getAttribute('aria-selected') === 'true' || /selected|active/i.test(typeof x.className === 'string' ? x.className : ''));
+  }
+
+  function monthNavButton(cal, dir) {
+    const lr = cal.label.getBoundingClientRect();
+    const cx = lr.left + lr.width / 2;
+    const cy = lr.top + lr.height / 2;
+    const ARROW = /^[‹›<>«»←→❮❯⟨⟩]$/;
+    const seen = new Set();
+    const cands = [];
+    cal.root.querySelectorAll('button,[role="button"],a,span,div').forEach((e) => {
+      const isArrow = e.children.length === 0 && ARROW.test((e.textContent || '').trim());
+      const isBtn = e.matches('button,[role="button"],a');
+      if (!isArrow && !isBtn) return;
+      const target = e.closest('button,[role="button"],a') || e;
+      if (seen.has(target) || cal.days.some((d) => d.el === target || target.contains(d.leaf))) return;
+      const r = target.getBoundingClientRect();
+      if (!r.width || Math.abs(r.top + r.height / 2 - cy) > 40) return;
+      seen.add(target);
+      cands.push({ target, x: r.left + r.width / 2 });
+    });
+    const side = cands.filter((c) => (dir > 0 ? c.x > cx : c.x < cx)).sort((a, b) => (dir > 0 ? a.x - b.x : b.x - a.x));
+    return side.length ? side[0].target : null;
+  }
+
+  /** Click the month arrow and wait until the month label changes. Returns false when impossible. */
+  async function changeMonth(dir) {
+    const cal = getCalendar();
+    if (!cal) return false;
+    const btn = monthNavButton(cal, dir);
+    if (!btn || isDisabledEl(btn)) return false;
+    const before = cal.label.textContent.trim();
+    await performNativeClick(btn);
+    const changed = await waitFor(() => {
+      const c = getCalendar();
+      return c && c.label.textContent.trim() !== before ? c : null;
+    }, 5000, 250, stopped);
+    return Boolean(changed);
+  }
+
+  const noSlotNodes = () => [...document.querySelectorAll('div,p,span,li,[role="alert"],[role="status"]')].filter((e) => {
+    if (e.closest('#ivac-helper-panel')) return false;
+    const t = textOf(e);
+    return t.length > 0 && t.length < 250 && NO_SLOT_RE.test(t);
+  });
+
+  const continueBookingBtn = () => findClickable(/continue booking/i, { enabledOnly: false });
+
+  /** Select one circled date and give the site `dwellSec` seconds to show a slot. */
+  async function tryDate(n, monthText) {
+    const cal = getCalendar();
+    const cell = cal && cal.days.find((d) => d.n === n);
+    if (!cell || !isAvailableDay(cell)) return 'skip';
+    const pre = new Set(noSlotNodes());
+    const wasSelected = isSelectedCell(cell);
+    if (!wasSelected) await performNativeClick(cell.el);
+    setAutoState(`date ${n} (${monthText})`);
+    const dwell = Math.max(1, autoCfg.dwellSec);
+    addLog(`Checking ${monthText} - date ${n}: waiting up to ${dwell}s for a slot...`);
+    const t0 = Date.now();
+    let negSeen = wasSelected && pre.size > 0;
+    let okSince = null;
+    while (Date.now() - t0 < dwell * 1000) {
+      if (!auto.running) return 'stopped';
+      if (noSlotNodes().some((x) => !pre.has(x))) negSeen = true;
+      const btn = continueBookingBtn();
+      const ready = btn && !isDisabledEl(btn) && cloudflareOkOrAbsent();
+      // Ignore the first moments after the click (page still loading); scale with the wait time.
+      const warmUp = Math.min(2500, dwell * 300);
+      const sustain = Math.min(1500, dwell * 150);
+      if (ready && !negSeen && Date.now() - t0 > warmUp) {
+        okSince = okSince || Date.now();
+        if (Date.now() - okSince >= sustain) return 'slot';
+      } else {
+        okSince = null;
+      }
+      await sleep(400);
+    }
+    addLog(`No slot on ${monthText} - date ${n}${negSeen ? ' (site says slots are taken)' : ''}.`);
+    return 'none';
+  }
+
+  /** Scan circled dates month after month. Returns 'slot' | 'exhausted' | 'stopped' | 'nocal'. */
+  async function scanCalendar() {
+    for (; auto.cycle < autoCfg.maxCycles && auto.running; auto.cycle++) {
+      addLog(`Calendar scan - round ${auto.cycle + 1}/${autoCfg.maxCycles}`);
+      let moved = 0;
+      for (let m = 0; m < autoCfg.maxMonths && auto.running; m++) {
+        const cal = await waitFor(getCalendar, 15000, 500, stopped);
+        if (!cal) { addLog('Calendar not found on the page.', 'warn'); return auto.running ? 'nocal' : 'stopped'; }
+        const monthText = cal.label.textContent.trim();
+        const days = cal.days.filter(isAvailableDay).map((d) => d.n).sort((a, b) => a - b);
+        addLog(`${monthText}: circled dates = ${days.length ? days.join(', ') : 'none'}`);
+        for (const n of days) {
+          const res = await tryDate(n, monthText);
+          if (res === 'slot') return { result: 'slot', n, monthText };
+          if (res === 'stopped') return 'stopped';
+        }
+        if (m < autoCfg.maxMonths - 1) {
+          addLog(`Month finished - going to the next month.`);
+          if (!(await changeMonth(+1))) { addLog('No next month available.'); break; }
+          moved++;
+        }
+      }
+      for (let k = 0; k < moved && auto.running; k++) await changeMonth(-1);
+      if (auto.cycle < autoCfg.maxCycles - 1 && auto.running) {
+        addLog(`No slot yet. Next round in ${autoCfg.cyclePauseSec}s.`);
+        setAutoState(`next round in ${autoCfg.cyclePauseSec}s`);
+        await sleepAbortable(autoCfg.cyclePauseSec * 1000);
+      }
+    }
+    return auto.running ? 'exhausted' : 'stopped';
+  }
+
+  async function stepTimeSlot() {
+    const v = auto.visits;
+    if (v.scanning) return;
+    v.scanning = true;
+    setAutoState('calendar scan');
+    const res = await scanCalendar();
+    if (res && res.result === 'slot') {
+      addLog(`SLOT AVAILABLE: ${res.monthText} - date ${res.n}. Complete Continue Booking now!`);
+      setStatus(`SLOT FOUND: ${res.monthText} date ${res.n}`, 'ok');
+      document.title = '✅ SLOT FOUND - ' + document.title.replace(/^✅ SLOT FOUND - /, '');
+      beep();
+      if (autoCfg.autoContinue) {
+        const btn = continueBookingBtn();
+        if (btn && !isDisabledEl(btn)) { addLog('Auto-clicking Continue Booking (enabled in CONFIG).'); await performNativeClick(btn); }
+      } else {
+        addLog('Continue Booking is left to you (CONFIG: "Auto-click Continue Booking" is off).');
+      }
+      autoStop('slot found');
+    } else if (res === 'exhausted') {
+      autoStop('no slot found in all rounds');
+    } else if (res === 'nocal') {
+      v.scanning = false;
+      await sleep(3000);
+    }
+  }
+
+  // ---------------- page inspector (for tuning selectors) ----------------
+  function inspectPage() {
+    addLog(`INSPECT ${location.pathname}`);
+    const btns = [...document.querySelectorAll('button,a,[role="button"]')].filter((e) => !e.closest('#ivac-helper-panel') && isVisible(e)).slice(0, 25);
+    addLog('Buttons: ' + (btns.map((b) => `"${textOf(b).slice(0, 28)}"${isDisabledEl(b) ? '(off)' : ''}`).join(', ') || 'none'));
+    addLog(`File inputs: ${getAllFileInputs().length} (visible: ${getAllFileInputs().filter(isVisible).length})`);
+    const cal = getCalendar();
+    if (cal) {
+      addLog(`Calendar: ${cal.label.textContent.trim()}, cells=${cal.days.length}, circled=${cal.days.filter(isAvailableDay).map((d) => d.n).join(',') || 'none'}`);
+      const sample = cal.days.slice(0, 3).concat(cal.days.filter(isAvailableDay).slice(0, 2));
+      sample.forEach((d) => {
+        const cs = getComputedStyle(d.el);
+        addLog(`  day ${d.n}: <${d.el.tagName.toLowerCase()} class="${String(d.el.className).slice(0, 40)}"> border=${cs.borderTopWidth} ${cs.borderTopColor} bg=${cs.backgroundColor} avail=${isAvailableDay(d)}`);
+      });
+      addLog(`Month arrows: prev=${monthNavButton(cal, -1) ? 'yes' : 'no'}, next=${monthNavButton(cal, +1) ? 'yes' : 'no'}`);
+    }
+    addLog(`No-slot messages: ${noSlotNodes().length}, Continue Booking: ${continueBookingBtn() ? (isDisabledEl(continueBookingBtn()) ? 'disabled' : 'enabled') : 'absent'}`);
+  }
+
+  // ==========================================================
   // Copy / paste support
   // Some sites block paste/copy/right-click with page-level handlers. These capture-phase
   // listeners keep those handlers from seeing events that happen inside the helper panel
@@ -1212,9 +1912,19 @@
       await store.set('apiSecret', settings.apiSecret);
       await store.set('apiUrl', settings.apiUrl);
       await store.set('otpDelaySec', settings.otpDelaySec);
+      const readNum = (id, def, min) => { const x = Number(document.getElementById(id).value); return Number.isFinite(x) && x >= min ? x : def; };
+      autoCfg.dwellSec = readNum('ivac-cfg-dwell', 15, 1);
+      autoCfg.maxMonths = readNum('ivac-cfg-months', 3, 1);
+      autoCfg.cyclePauseSec = readNum('ivac-cfg-pause', 60, 5);
+      autoCfg.maxCycles = readNum('ivac-cfg-cycles', 10, 1);
+      autoCfg.autoContinue = document.getElementById('ivac-cfg-autocontinue').checked;
+      for (const k of ['dwellSec', 'maxMonths', 'cyclePauseSec', 'maxCycles', 'autoContinue']) await store.set(k, autoCfg[k]);
       setStatus('Settings saved.', 'ok');
     });
 
+    document.getElementById('ivac-btn-start').addEventListener('click', () => autoStart('START button'));
+    document.getElementById('ivac-btn-stop').addEventListener('click', () => autoStop('STOP pressed'));
+    document.getElementById('ivac-btn-inspect').addEventListener('click', inspectPage);
     document.getElementById('ivac-btn-clear-log').addEventListener('click', () => {
       logLines.length = 0;
       renderAllLogs();
@@ -1225,6 +1935,7 @@
       // Reset submission flag and start React-safe auto sign in
       signInSubmitted = false;
       addLog('Login clicked.');
+      document.getElementById('ivac-otp').value = ''; // a new login sends a new OTP - never reuse the old one
       const helperMobileInput = document.getElementById('ivac-phone');
       const helperPasswordInput = document.getElementById('ivac-password');
       autoSignIn(
@@ -1258,11 +1969,22 @@
     document.getElementById('ivac-api-secret').value = settings.apiSecret;
     document.getElementById('ivac-api-url').value = settings.apiUrl;
     document.getElementById('ivac-otp-delay').value = String(settings.otpDelaySec);
+    document.getElementById('ivac-cfg-dwell').value = String(autoCfg.dwellSec);
+    document.getElementById('ivac-cfg-months').value = String(autoCfg.maxMonths);
+    document.getElementById('ivac-cfg-pause').value = String(autoCfg.cyclePauseSec);
+    document.getElementById('ivac-cfg-cycles').value = String(autoCfg.maxCycles);
+    document.getElementById('ivac-cfg-autocontinue').checked = autoCfg.autoContinue;
     await restorePanelState(panel);
 
     log('Helper panel injected on', window.location.href);
     addLog('Helper ready' + (settings.deviceId ? ` (Device ID: ${settings.deviceId})` : ' - set your Device ID.'));
     setStatus('Helper ready. Update CONFIG selectors if needed.', 'ok');
+
+    // Resume after a page reload/redirect, but only if automation was active in the last 3 minutes.
+    const wasRunning = await store.get('autoRun', false);
+    const lastActive = Number(await store.get('autoActive', 0));
+    if (wasRunning && Date.now() - lastActive < 180000) autoStart('resume after reload');
+    else if (wasRunning) store.set('autoRun', false);
   }
 
   function startInit() {
@@ -1279,5 +2001,6 @@
   window.IVAC = Object.assign(window.IVAC || {}, {
     waitForSelector, fillInput, click, CONFIG, findLoginButton, waitForLoginButton,
     parseOtp, fetchLatestOtp, fetchAndFillOtp, applyFiles, addLog,
+    autoStart, autoStop, uploadSequence, autoAssignFiles, getCalendar, isAvailableDay, inspectPage,
   });
 })();

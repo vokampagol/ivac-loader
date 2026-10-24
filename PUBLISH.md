@@ -51,3 +51,14 @@ time - both create `#ivac-helper-panel`.
 `main.js` features: Device ID (saved with GM_setValue), auto OTP fetch ~5 s after Login (API secret is entered once in
 the CONFIG tab and stored only in Tampermonkey storage - never commit it), FILES tab (1 primary + 3 secondary PDFs,
 kept in memory only), LOG tab. Cloudflare / CAPTCHA are never bypassed and no form is auto-submitted by the file tools.
+
+## Automation (START / STOP)
+
+The START button (always visible at the top of the panel) walks the booking pages:
+`/signin` -> OTP page -> `/` -> `/appointment/notice` -> `/appointment/file-upload` -> `/appointment/mission` -> `/appointment/time-slot`.
+
+- FILES tab: **Select PDFs & START** (or drag & drop). A file name containing "primary" is the primary applicant, the others are secondary 1-3.
+- Calendar: only circled dates are tried, ascending; each date gets 15 s (CONFIG), then the next date, then the next month (CONFIG: months, rounds, pause).
+- Stops by itself when a slot is found and beeps. "Auto-click Continue Booking" in CONFIG is **off** by default; payment is never automated.
+- Cloudflare / CAPTCHA are never bypassed - automation waits until the check is passed.
+- LOG tab -> **Inspect page** lists the buttons / file inputs / calendar cells the script sees (use it if a step does not react).
