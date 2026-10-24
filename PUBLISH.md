@@ -62,3 +62,10 @@ The START button (always visible at the top of the panel) walks the booking page
 - Stops by itself when a slot is found and beeps. "Auto-click Continue Booking" in CONFIG is **off** by default; payment is never automated.
 - Cloudflare / CAPTCHA are never bypassed - automation waits until the check is passed.
 - LOG tab -> **Inspect page** lists the buttons / file inputs / calendar cells the script sees (use it if a step does not react).
+
+## Private repository
+
+`raw.githubusercontent.com` answers **404** for a private repo. Either make the repo public, or in Tampermonkey click the
+extension icon -> "IVAC: set GitHub token (private repo)" and paste a fine-grained token (this repo only, Contents: Read-only).
+The token is kept in Tampermonkey storage only. The loader also keeps the last working `main.js` and uses it when GitHub is unreachable.
+Auto-update of the loader itself (`@updateURL`) does not work for a private repo - paste new loader versions manually.

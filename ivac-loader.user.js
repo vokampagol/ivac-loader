@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IVAC Appointment Loader
 // @namespace    https://github.com/vokampagol/ivac-loader
-// @version      1.6
+// @version      1.7
 // @description  Loads the latest main.js from GitHub for appointment.ivacbd.com
 // @author       vokampagol
 // @match        https://appointment.ivacbd.com/*
@@ -9,6 +9,7 @@
 // @grant        GM_addElement
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
 // @connect      raw.githubusercontent.com
 // @connect      cdn.jsdelivr.net
@@ -25,7 +26,7 @@
   const BRANCH = 'main';
   const FILE = 'main.js';
   const TAG = '[IVAC Loader]';
-  const VERSION = '1.6';
+  const VERSION = '1.7';
 
   // Sources tried in order. raw.githubusercontent.com is the freshest (~5 min cache);
   // jsDelivr is only a backup if raw is blocked.
@@ -37,12 +38,12 @@
 
   // Download through Tampermonkey (bypasses the page's CORS/CSP and the
   // "text/plain + nosniff" problem that stops <script src="raw.githubusercontent..."> from running).
-  function download(url) {
+  function download(url, extraHeaders = {}) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: 'GET',
         url,
-        headers: { 'Cache-Control': 'no-cache' },
+        headers: Object.assign({ 'Cache-Control': 'no-cache' }, extraHeaders),
         timeout: 15000,
         onload: (r) => (r.status >= 200 && r.status < 300 && r.responseText
           ? resolve(r.responseText)
@@ -124,42 +125,80 @@
     } catch (e) { /* ignore */ }
   }
 
+  // ---- private-repo support -------------------------------------------------------------
+  // raw.githubusercontent.com answers 404 for a PRIVATE repo unless a token is sent.
+  // Tampermonkey menu -> "IVAC: set GitHub token" stores a read-only token (GM storage, never in the repo).
+  const TOKEN_KEY = 'ghToken';
+  const CACHE_KEY = 'cachedMainJs';
+  const getToken = () => { try { return String(GM_getValue(TOKEN_KEY, '') || '').trim(); } catch (e) { return ''; } };
+
+  try {
+    GM_registerMenuCommand('IVAC: set GitHub token (private repo)', () => {
+      const t = window.prompt('Paste a GitHub token with READ access to Contents of ' + REPO + '\n(fine-grained token, Contents: Read-only). Leave empty to remove.', '');
+      if (t === null) return;
+      GM_setValue(TOKEN_KEY, t.trim());
+      location.reload();
+    });
+  } catch (e) { /* menu not available */ }
+
   async function main() {
     badge('starting...', true);
-    let lastErr;
+    const token = getToken();
+    const errors = [];
+    let code = null;
+    let source = '';
+
     for (const url of SOURCES) {
-      let code;
+      const isRaw = url.includes('raw.githubusercontent.com');
       try {
-        code = await download(url);
+        code = await download(url, isRaw && token ? { Authorization: 'token ' + token } : {});
+        source = url.split('?')[0];
+        break;
       } catch (e) {
-        lastErr = e;
+        errors.push(`${url.split('/')[2]}: ${e.message}`);
         console.warn(TAG, 'download failed for', url.split('?')[0], '-', e.message);
-        badge('FAILED ' + url.split('/')[2] + ': ' + e.message, false);
-        continue;
-      }
-      try {
-        const how = run(code);
-        console.log(TAG, `main.js loaded via ${how} from`, url.split('?')[0]);
-        badge('main.js executed (' + how + '). Checking panel...', true);
-        window.addEventListener('error', (ev) => badge('PAGE ERROR: ' + ev.message, false));
-        setTimeout(() => {
-          const panel = document.getElementById('ivac-helper-panel');
-          if (panel) {
-            badge('OK - helper panel is on page', true);
-            setTimeout(() => { const b = document.getElementById('ivac-loader-badge'); if (b) b.remove(); }, 5000);
-          } else {
-            badge('main.js ran but PANEL NOT CREATED (see Console F12)', false);
-          }
-        }, 2000);
-        return;
-      } catch (e) {
-        lastErr = e;
-        console.error(TAG, 'main.js failed to run:', e);
-        badge('main.js ERROR: ' + e.message, false);
-        return; // do not run a second copy
       }
     }
-    console.error(TAG, 'Could not load main.js:', lastErr);
+
+    let usedCache = false;
+    if (code) {
+      try { GM_setValue(CACHE_KEY, code); } catch (e) { /* storage full - ignore */ }
+    } else {
+      // Offline / private repo without token: run the last copy that worked.
+      let cached = '';
+      try { cached = String(GM_getValue(CACHE_KEY, '') || ''); } catch (e) { /* ignore */ }
+      if (cached) {
+        code = cached;
+        usedCache = true;
+        source = 'cached copy';
+      }
+    }
+
+    if (!code) {
+      const priv = errors.some((m) => /HTTP 404/.test(m)) && !token;
+      console.error(TAG, 'Could not load main.js:', errors);
+      badge('FAILED (' + errors.join(' | ') + ')' + (priv ? ' - repo is PRIVATE: make it public or use Tampermonkey menu "IVAC: set GitHub token"' : ''), false);
+      return;
+    }
+
+    try {
+      const how = run(code);
+      console.log(TAG, `main.js loaded via ${how} from`, source);
+      badge('main.js executed (' + how + ', ' + source + '). Checking panel...', !usedCache);
+      window.addEventListener('error', (ev) => badge('PAGE ERROR: ' + ev.message, false));
+      setTimeout(() => {
+        const panel = document.getElementById('ivac-helper-panel');
+        if (panel) {
+          badge(usedCache ? 'OK - using CACHED copy (GitHub not reachable: ' + errors[0] + ')' : 'OK - helper panel is on page', !usedCache);
+          if (!usedCache) setTimeout(() => { const b = document.getElementById('ivac-loader-badge'); if (b) b.remove(); }, 5000);
+        } else {
+          badge('main.js ran but PANEL NOT CREATED (see Console F12)', false);
+        }
+      }, 2000);
+    } catch (e) {
+      console.error(TAG, 'main.js failed to run:', e);
+      badge('main.js ERROR: ' + e.message, false);
+    }
   }
 
   main();
