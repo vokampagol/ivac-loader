@@ -97,6 +97,8 @@
     autoCfg.cyclePauseSec = await num('cyclePauseSec', 60, 5);
     autoCfg.maxCycles = await num('maxCycles', 10, 1);
     autoCfg.autoContinue = Boolean(await store.get('autoContinue', false));
+    autoCfg.preferCenter = String(await store.get('preferCenter', ''));
+    autoCfg.startAt = String(await store.get('startAt', ''));
     if (!HAS_GM_STORE) addLog('GM storage not available - settings are kept in browser localStorage.', 'warn');
   }
 
@@ -633,9 +635,17 @@
       const rect = el.getBoundingClientRect();
       const cx = rect.left + rect.width / 2;
       const cy = rect.top + rect.height / 2;
-      const events = ['mouseover', 'mousemove', 'mousedown', 'mouseup', 'click'];
+      const events = ['pointerover', 'pointerenter', 'mouseover', 'mousemove', 'pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
       for (const type of events) {
-        const ev = new MouseEvent(type, {
+        const isPointer = type.startsWith('pointer');
+        const Ctor = isPointer && typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
+        const ev = new Ctor(type, {
+          pointerId: 1,
+          pointerType: 'mouse',
+          isPrimary: true,
+          button: 0,
+          buttons: type === 'pointerdown' || type === 'mousedown' ? 1 : 0,
+          detail: type === 'click' ? 1 : 0,
           view: window,
           bubbles: true,
           cancelable: true,
@@ -940,6 +950,10 @@
           </div>
           <div class="ivac-field-label">Pause between rounds (seconds)</div>
           <input type="number" class="ivac-input" id="ivac-cfg-pause" min="5" max="3600" value="60">
+          <div class="ivac-field-label">Preferred IVAC center (optional, e.g. "JFP"; empty = from your primary file's mission)</div>
+          <input type="text" class="ivac-input" id="ivac-cfg-center" placeholder="auto" autocomplete="off" spellcheck="false">
+          <div class="ivac-field-label">Start automation at (HH:MM, optional - e.g. 12:00 when booking opens)</div>
+          <input type="text" class="ivac-input" id="ivac-cfg-startat" placeholder="now" maxlength="5" autocomplete="off">
           <label class="ivac-note"><input type="checkbox" id="ivac-cfg-autocontinue"> Auto-click "Continue Booking" when a slot is found (off = you click it)</label>
           <button class="ivac-btn ivac-btn-green ivac-full" id="ivac-btn-save-config">Save settings</button>
           <div class="ivac-note">The OTP is fetched once after Login. Use ⟳ OTP in the RUN tab to retry. Cloudflare / CAPTCHA are never bypassed - you complete them yourself.</div>
@@ -1179,8 +1193,8 @@
   // payment / final booking is left to you unless "auto-click Continue Booking" is ticked.
   // ==========================================================
   const SITE_HOME = 'https://appointment.ivacbd.com/';
-  const autoCfg = { dwellSec: 15, maxMonths: 3, cyclePauseSec: 60, maxCycles: 10, autoContinue: false };
-  const auto = { running: false, busy: false, timer: null, lastPath: null, visits: {}, cycle: 0, homeJumps: 0, lastSave: 0 };
+  const autoCfg = { dwellSec: 15, maxMonths: 3, cyclePauseSec: 60, maxCycles: 10, autoContinue: false, preferCenter: '', startAt: '' };
+  const auto = { running: false, busy: false, timer: null, lastPath: null, visits: {}, cycle: 0, homeJumps: 0, lastSave: 0, waitUntil: 0 };
 
   const MONTH_RE = /(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})/i;
   const NO_SLOT_RE = /temporarily held|no (available )?slots?|slots? (is |are )?(not available|unavailable|full)|fully booked|sold out|no appointment|not available/i;
@@ -1221,12 +1235,12 @@
   }
 
   /** Disabled in the HTML sense OR visually faded (the site fades its buttons while Cloudflare verifies). */
-  function isDisabledEl(el) {
+  function isDisabledEl(el, { ignoreOpacity = false } = {}) {
     if (!el) return true;
     if (el.disabled || el.getAttribute('aria-disabled') === 'true') return true;
     if (typeof el.className === 'string' && /\bdisabled\b/i.test(el.className)) return true;
     const cs = getComputedStyle(el);
-    return cs.pointerEvents === 'none' || cs.cursor === 'not-allowed' || parseFloat(cs.opacity) < 0.85;
+    return cs.pointerEvents === 'none' || cs.cursor === 'not-allowed' || (!ignoreOpacity && parseFloat(cs.opacity) < 0.85);
   }
 
   /** First visible button/link whose text matches re (outside the helper panel). */
@@ -1294,6 +1308,13 @@
     auto.homeJumps = 0;
     auto.lastPath = null;
     auto.visits = {};
+    auto.waitUntil = 0;
+    const m = /^(\d{1,2}):(\d{2})$/.exec(autoCfg.startAt || '');
+    if (m) {
+      const t = new Date();
+      t.setHours(Number(m[1]), Number(m[2]), 0, 0);
+      if (t.getTime() > Date.now()) { auto.waitUntil = t.getTime(); addLog(`Scheduled: automation waits until ${autoCfg.startAt}.`); }
+    }
     await store.set('autoRun', true);
     await store.set('autoActive', Date.now());
     addLog(`AUTOMATION started (${source}).`);
@@ -1314,6 +1335,11 @@
 
   async function tick() {
     if (!auto.running || auto.busy) return;
+    if (auto.waitUntil && Date.now() < auto.waitUntil) {
+      setAutoState(`starts at ${autoCfg.startAt} (in ${Math.ceil((auto.waitUntil - Date.now()) / 1000)}s)`);
+      store.set('autoActive', Date.now());
+      return;
+    }
     auto.busy = true;
     try {
       const p = pagePath();
@@ -1431,26 +1457,59 @@
     await clickStep('confirm', /confirm all information/i, 6000);
   }
 
+  /**
+   * Pick the IVAC center. The site fills the mission from the primary web file (e.g. "Rajshahi");
+   * we match the center list against that mission. A preferred center from CONFIG wins when set.
+   * Returns the index in `texts`, or -1 when it would be a guess.
+   */
+  function chooseCenter(texts, mission, prefer) {
+    const low = texts.map((t) => t.toLowerCase());
+    const p = (prefer || '').trim().toLowerCase();
+    if (p) {
+      const i = low.findIndex((t) => t.includes(p));
+      if (i !== -1) return i;
+    }
+    if (texts.length === 1) return 0;
+    const m = (mission || '').split('-').pop().trim().toLowerCase();
+    if (m) {
+      const hits = low.map((t, i) => (t.includes(m) ? i : -1)).filter((i) => i !== -1);
+      if (hits.length === 1) return hits[0];
+    }
+    return -1;
+  }
+
   async function stepMission() {
     const v = auto.visits;
     setAutoState('mission / center');
     const body = textOf(document.body);
+    const mm = body.match(/Select a mission\s+(.+?)\s+Select your IVAC center/i);
+    const mission = mm ? mm[1].trim() : '';
+    if (mission && !v.missionLogged) { v.missionLogged = true; addLog(`Mission from your primary file: ${mission}`); }
     const unselected = /Select your IVAC center\s*Select IVAC center/i.test(body);
     if (unselected) {
-      // Open the center list once, then take the option only when exactly one center is offered.
+      // Open the center list once, then choose the center that belongs to the mission.
       if (!v.opened) {
         const trigger = [...document.querySelectorAll('div,button,span')].find((e) => !e.closest('#ivac-helper-panel') && e.children.length === 0 && /^Select IVAC center$/i.test(textOf(e)));
         if (trigger) { v.opened = true; addLog('Opening the IVAC center list.'); await performNativeClick(trigger.closest('button,[role="button"],div') || trigger); await sleep(600); }
       }
-      const options = [...document.querySelectorAll('div,li,button,span')].filter((e) => !e.closest('#ivac-helper-panel') && e.children.length === 0 && /^IVAC,/i.test(textOf(e)) && isVisible(e));
-      if (options.length === 1 && !v.picked) {
+      const seen = new Set();
+      const options = [...document.querySelectorAll('div,li,button,span')].filter((e) => {
+        if (e.closest('#ivac-helper-panel') || e.children.length || !/^IVAC,/i.test(textOf(e)) || !isVisible(e)) return false;
+        const t = textOf(e).toLowerCase();
+        if (seen.has(t)) return false;
+        seen.add(t);
+        return true;
+      });
+      if (!options.length || v.picked) return;
+      const idx = chooseCenter(options.map(textOf), mission, autoCfg.preferCenter);
+      if (idx !== -1) {
         v.picked = true;
-        addLog(`Only one center offered: ${textOf(options[0])} - selecting it.`);
-        await performNativeClick(options[0]);
+        addLog(`Selecting center: ${textOf(options[idx])}${mission ? ` (mission ${mission})` : ''}.`);
+        await performNativeClick(options[idx]);
         await sleep(600);
-      } else if (options.length > 1 && !v.multi) {
+      } else if (!v.multi) {
         v.multi = true;
-        addLog('Several IVAC centers offered - choose yours manually; automation continues afterwards.', 'warn');
+        addLog('Several IVAC centers match - choose yours manually (or set "Preferred center" in CONFIG); automation continues afterwards.', 'warn');
       }
       return;
     }
@@ -1670,7 +1729,7 @@
     const cal = getCalendar();
     if (!cal) return false;
     const btn = monthNavButton(cal, dir);
-    if (!btn || isDisabledEl(btn)) return false;
+    if (!btn || isDisabledEl(btn, { ignoreOpacity: true })) return false;
     const before = cal.label.textContent.trim();
     await performNativeClick(btn);
     const changed = await waitFor(() => {
@@ -1918,7 +1977,9 @@
       autoCfg.cyclePauseSec = readNum('ivac-cfg-pause', 60, 5);
       autoCfg.maxCycles = readNum('ivac-cfg-cycles', 10, 1);
       autoCfg.autoContinue = document.getElementById('ivac-cfg-autocontinue').checked;
-      for (const k of ['dwellSec', 'maxMonths', 'cyclePauseSec', 'maxCycles', 'autoContinue']) await store.set(k, autoCfg[k]);
+      autoCfg.preferCenter = document.getElementById('ivac-cfg-center').value.trim();
+      autoCfg.startAt = document.getElementById('ivac-cfg-startat').value.trim();
+      for (const k of ['dwellSec', 'maxMonths', 'cyclePauseSec', 'maxCycles', 'autoContinue', 'preferCenter', 'startAt']) await store.set(k, autoCfg[k]);
       setStatus('Settings saved.', 'ok');
     });
 
@@ -1974,6 +2035,8 @@
     document.getElementById('ivac-cfg-pause').value = String(autoCfg.cyclePauseSec);
     document.getElementById('ivac-cfg-cycles').value = String(autoCfg.maxCycles);
     document.getElementById('ivac-cfg-autocontinue').checked = autoCfg.autoContinue;
+    document.getElementById('ivac-cfg-center').value = autoCfg.preferCenter;
+    document.getElementById('ivac-cfg-startat').value = autoCfg.startAt;
     await restorePanelState(panel);
 
     log('Helper panel injected on', window.location.href);
@@ -1986,6 +2049,14 @@
     if (wasRunning && Date.now() - lastActive < 180000) autoStart('resume after reload');
     else if (wasRunning) store.set('autoRun', false);
   }
+
+  // Show page errors in the LOG with their source file: tells whether the site or this script threw.
+  window.addEventListener('error', (e) => {
+    const src = e.filename ? ` @ ${String(e.filename).split('/').slice(-1)[0]}:${e.lineno}` : '';
+    addLog(`Page error: ${e.message}${src}`, 'warn');
+    const b = document.getElementById('ivac-loader-badge');
+    if (b && /PAGE ERROR/.test(b.textContent)) b.remove(); // the site's own errors are not a loader failure
+  });
 
   function startInit() {
     init().catch((err) => console.error('[IVAC Helper] init failed', err));
