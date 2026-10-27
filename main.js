@@ -1299,8 +1299,11 @@
   }
 
   const cloudflareOkOrAbsent = () => {
-    const t = document.querySelector('input[name="cf-turnstile-response"]');
-    return !t || Boolean(t.value && t.value.trim());
+    const inputs = [...document.querySelectorAll('input[name="cf-turnstile-response"]')];
+    if (!inputs.length) return true;
+    if (inputs.some((t) => t.value && t.value.trim())) return true;
+    // Some pages keep an empty duplicate field: the visible widget saying "Success!" counts too.
+    return [...document.querySelectorAll('div,span')].some((e) => !e.closest('#ivac-helper-panel') && e.children.length === 0 && /^success!?$/i.test(textOf(e)) && isVisible(e));
   };
 
   function setAutoState(text) {
@@ -1819,11 +1822,13 @@
     const t0 = Date.now();
     let negSeen = wasSelected && pre.size > 0;
     let okSince = null;
+    let everReady = false;
     while (Date.now() - t0 < dwell * 1000) {
       if (!auto.running) return 'stopped';
       if (noSlotNodes().some((x) => !pre.has(x))) negSeen = true;
       const btn = continueBookingBtn();
-      const ready = btn && !isDisabledEl(btn) && cloudflareOkOrAbsent();
+      const ready = btn && !isDisabledEl(btn, { ignoreOpacity: true }) && cloudflareOkOrAbsent();
+      if (ready) everReady = true;
       // Ignore the first moments after the click (page still loading); scale with the wait time.
       const warmUp = Math.min(2500, dwell * 300);
       const sustain = Math.min(1500, dwell * 150);
@@ -1835,7 +1840,8 @@
       }
       await sleep(400);
     }
-    addLog(`No slot on ${monthText} - date ${n}${negSeen ? ' (site says slots are taken)' : ''}.`);
+    const b = continueBookingBtn();
+    addLog(`No slot on ${monthText} - date ${n}${negSeen ? ' (site says slots are taken)' : ` (Continue Booking: ${b ? (isDisabledEl(b, { ignoreOpacity: true }) ? 'disabled' : 'enabled') : 'not found'}, Cloudflare: ${cloudflareOkOrAbsent() ? 'ok' : 'not done'}, ever ready: ${everReady})`}.`);
     return 'none';
   }
 
