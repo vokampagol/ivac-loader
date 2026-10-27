@@ -1823,12 +1823,23 @@
     let negSeen = wasSelected && pre.size > 0;
     let okSince = null;
     let everReady = false;
+    let clicked = false;
+    auto.visits.contClicked = false;
+    const startPath = location.pathname;
     while (Date.now() - t0 < dwell * 1000) {
       if (!auto.running) return 'stopped';
       if (noSlotNodes().some((x) => !pre.has(x))) negSeen = true;
       const btn = continueBookingBtn();
       const ready = btn && !isDisabledEl(btn, { ignoreOpacity: true }) && cloudflareOkOrAbsent();
       if (ready) everReady = true;
+      // Press Continue Booking as soon as the site enables it (then give the page a moment to move on).
+      if (ready && autoCfg.autoContinue && !clicked && Date.now() - t0 > 800) {
+        clicked = true;
+        auto.visits.contClicked = true;
+        addLog(`Continue Booking is enabled on ${monthText} - date ${n}: clicking it.`);
+        await performNativeClick(btn);
+      }
+      if (clicked && location.pathname !== startPath) return 'slot'; // the click took us to the next booking page
       // Ignore the first moments after the click (page still loading); scale with the wait time.
       const warmUp = Math.min(2500, dwell * 300);
       const sustain = Math.min(1500, dwell * 150);
@@ -1841,7 +1852,7 @@
       await sleep(400);
     }
     const b = continueBookingBtn();
-    addLog(`No slot on ${monthText} - date ${n}${negSeen ? ' (site says slots are taken)' : ` (Continue Booking: ${b ? (isDisabledEl(b, { ignoreOpacity: true }) ? 'disabled' : 'enabled') : 'not found'}, Cloudflare: ${cloudflareOkOrAbsent() ? 'ok' : 'not done'}, ever ready: ${everReady})`}.`);
+    addLog(`No slot on ${monthText} - date ${n}${negSeen ? ' (site says slots are taken)' : ` (Continue Booking: ${b ? (isDisabledEl(b, { ignoreOpacity: true }) ? `disabled by site${b.disabled ? ' (disabled attribute)' : ''}` : 'enabled') : 'not found'}, Cloudflare: ${cloudflareOkOrAbsent() ? 'ok' : 'not done'}, ever ready: ${everReady})`}.`);
     return 'none';
   }
 
@@ -1901,7 +1912,9 @@
       setStatus(`SLOT FOUND: ${res.monthText} date ${res.n}`, 'ok');
       document.title = '✅ SLOT FOUND - ' + document.title.replace(/^✅ SLOT FOUND - /, '');
       beep();
-      if (autoCfg.autoContinue) {
+      if (autoCfg.autoContinue && auto.visits.contClicked) {
+        addLog('Continue Booking was already clicked for this date.');
+      } else if (autoCfg.autoContinue) {
         const btn = continueBookingBtn();
         if (btn && !isDisabledEl(btn)) { addLog('Auto-clicking Continue Booking (enabled in CONFIG).'); await performNativeClick(btn); }
       } else {
