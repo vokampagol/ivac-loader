@@ -96,7 +96,7 @@
     autoCfg.maxMonths = await num('maxMonths', 3, 1);
     autoCfg.cyclePauseSec = await num('cyclePauseSec', 60, 5);
     autoCfg.maxCycles = await num('maxCycles', 10, 1);
-    autoCfg.autoContinue = Boolean(await store.get('autoContinue', false));
+    autoCfg.autoContinue = (await store.get('autoContinueV2', true)) !== false;
     autoCfg.preferCenter = String(await store.get('preferCenter', ''));
     autoCfg.startAt = String(await store.get('startAt', ''));
     if (!HAS_GM_STORE) addLog('GM storage not available - settings are kept in browser localStorage.', 'warn');
@@ -1225,7 +1225,7 @@
   // payment / final booking is left to you unless "auto-click Continue Booking" is ticked.
   // ==========================================================
   const SITE_HOME = 'https://appointment.ivacbd.com/';
-  const autoCfg = { dwellSec: 15, maxMonths: 3, cyclePauseSec: 60, maxCycles: 10, autoContinue: false, preferCenter: '', startAt: '' };
+  const autoCfg = { dwellSec: 15, maxMonths: 3, cyclePauseSec: 60, maxCycles: 10, autoContinue: true, preferCenter: '', startAt: '' };
   const auto = { running: false, busy: false, timer: null, lastPath: null, visits: {}, cycle: 0, homeJumps: 0, lastSave: 0, waitUntil: 0 };
 
   const MONTH_RE = /(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})/i;
@@ -1840,6 +1840,18 @@
   }
 
   /** Scan circled dates month after month. Returns 'slot' | 'exhausted' | 'stopped' | 'nocal'. */
+  /** After a month change the site re-renders/animates the cells: wait until the circled dates stop changing. */
+  async function settleCalendar() {
+    let last = null;
+    for (let i = 0; i < 12 && !stopped(); i++) {
+      const c = getCalendar();
+      const sig = c ? c.days.filter(isAvailableDay).map((d) => d.n).sort((a, b) => a - b).join(',') : '';
+      if (sig && sig === last) break;
+      last = sig;
+      await sleep(300);
+    }
+  }
+
   async function scanCalendar() {
     for (; auto.cycle < autoCfg.maxCycles && auto.running; auto.cycle++) {
       addLog(`Calendar scan - round ${auto.cycle + 1}/${autoCfg.maxCycles}`);
@@ -1847,8 +1859,9 @@
       for (let m = 0; m < autoCfg.maxMonths && auto.running; m++) {
         const cal = await waitFor(getCalendar, 15000, 500, stopped);
         if (!cal) { addLog('Calendar not found on the page.', 'warn'); return auto.running ? 'nocal' : 'stopped'; }
+        await settleCalendar();
         const monthText = cal.label.textContent.trim();
-        const days = cal.days.filter(isAvailableDay).map((d) => d.n).sort((a, b) => a - b);
+        const days = (getCalendar() || cal).days.filter(isAvailableDay).map((d) => d.n).sort((a, b) => a - b);
         addLog(`${monthText}: circled dates = ${days.length ? days.join(', ') : 'none'}`);
         for (const n of days) {
           const res = await tryDate(n, monthText);
@@ -2037,7 +2050,8 @@
       autoCfg.autoContinue = document.getElementById('ivac-cfg-autocontinue').checked;
       autoCfg.preferCenter = document.getElementById('ivac-cfg-center').value.trim();
       autoCfg.startAt = document.getElementById('ivac-cfg-startat').value.trim();
-      for (const k of ['dwellSec', 'maxMonths', 'cyclePauseSec', 'maxCycles', 'autoContinue', 'preferCenter', 'startAt']) await store.set(k, autoCfg[k]);
+      for (const k of ['dwellSec', 'maxMonths', 'cyclePauseSec', 'maxCycles', 'preferCenter', 'startAt']) await store.set(k, autoCfg[k]);
+      await store.set('autoContinueV2', autoCfg.autoContinue);
       setStatus('Settings saved.', 'ok');
     });
 
