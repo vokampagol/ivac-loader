@@ -900,6 +900,8 @@
             <button class="ivac-btn ivac-btn-gray" id="ivac-btn-fetch-otp" title="Fetch latest OTP now">⟳ OTP</button>
           </div>
 
+          <div class="ivac-note">Easy way: Login &rarr; FILES tab (choose files) &rarr; press START. Everything else is automatic.</div>
+          <details class="ivac-note"><summary style="cursor:pointer">Manual tools (not needed for START)</summary>
           <div class="ivac-row">
             <button class="ivac-btn ivac-btn-blue" id="ivac-btn-verify">✔ Verify</button>
             <button class="ivac-btn ivac-btn-orange" id="ivac-btn-application">Application</button>
@@ -932,6 +934,7 @@
             <button class="ivac-btn ivac-btn-orange" id="ivac-btn-booking">Booking</button>
             <button class="ivac-btn ivac-btn-blue" id="ivac-btn-auto">Auto Date</button>
           </div>
+          </details>
         </div>
 
         <!-- ============ CONFIG ============ -->
