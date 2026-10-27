@@ -1284,6 +1284,17 @@
       if (enabledOnly && isDisabledEl(el)) continue;
       return el;
     }
+    // Fallback: the site often builds buttons from plain <div>/<span> with cursor:pointer.
+    for (const el of document.querySelectorAll('div, span, p, li, label')) {
+      if (el.closest('#ivac-helper-panel') || !isVisible(el)) continue;
+      const t = textOf(el);
+      if (!t || t.length > 60 || !re.test(t)) continue;
+      let target = el;
+      while (target && target !== document.body && getComputedStyle(target).cursor !== 'pointer') target = target.parentElement;
+      if (!target || target === document.body) continue;
+      if (enabledOnly && isDisabledEl(target)) continue;
+      return target;
+    }
     return null;
   }
 
@@ -1309,7 +1320,13 @@
   async function clickStep(key, re, retryMs = 7000) {
     if (Date.now() - (auto.visits[key] || 0) < retryMs) return false;
     const el = findClickable(re);
-    if (!el) return false;
+    if (!el) {
+      if (!auto.visits['nf_' + key]) {
+        auto.visits['nf_' + key] = true;
+        addLog(`Button ${re} not found yet - waiting. (LOG > Inspect page shows what is on the page)`, 'warn');
+      }
+      return false;
+    }
     auto.visits[key] = Date.now();
     addLog(`Click: "${textOf(el).slice(0, 40)}"`);
     await performNativeClick(el);
@@ -2111,6 +2128,6 @@
   window.IVAC = Object.assign(window.IVAC || {}, {
     waitForSelector, fillInput, click, CONFIG, findLoginButton, waitForLoginButton,
     parseOtp, fetchLatestOtp, fetchAndFillOtp, applyFiles, addLog,
-    autoStart, autoStop, uploadSequence, autoAssignFiles, getCalendar, isAvailableDay, inspectPage,
+    findClickable, autoStart, autoStop, uploadSequence, autoAssignFiles, getCalendar, isAvailableDay, inspectPage,
   });
 })();
