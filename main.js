@@ -260,6 +260,20 @@
     nameEl.title = s ? s.file.name : '';
     statEl.textContent = s ? s.status : '-';
     statEl.className = 'ivac-fslot-status' + (s ? (/^Applied/.test(s.status) ? ' ok' : /^(Not|Error|Skipped)/.test(s.status) ? ' err' : ' ready') : '');
+    updateFilesSummary();
+  }
+
+  function updateFilesSummary() {
+    const el = document.getElementById('ivac-files-summary');
+    if (!el) return;
+    const n = FILE_SLOTS.filter((sl) => slotFiles[sl.key]).length;
+    const done = FILE_SLOTS.filter((sl) => slotFiles[sl.key] && /^Applied/.test(slotFiles[sl.key].status)).length;
+    el.className = 'ivac-files-summary' + (n ? ' ok' : '');
+    el.textContent = !n
+      ? 'Step 1: select your PDFs (all at once).'
+      : done === n
+        ? `\u2705 ${n} file(s) uploaded to the site.`
+        : `\u2705 ${n} file(s) ready. Step 2: press START - they upload by themselves on the upload page.`;
   }
 
   function setSlotFile(key, file) {
@@ -384,7 +398,7 @@
     easy.append(pickBtn, pickStart);
     const drop = document.createElement('div');
     drop.className = 'ivac-drop';
-    drop.textContent = 'or drop all PDFs here (name with "primary" = primary file)';
+    drop.textContent = 'or drop all PDFs here (file name with "primary" = primary applicant)';
     drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
     drop.addEventListener('dragleave', () => drop.classList.remove('over'));
     drop.addEventListener('drop', (e) => {
@@ -395,7 +409,16 @@
     const chk = document.createElement('label');
     chk.className = 'ivac-note';
     chk.innerHTML = '<input type="checkbox" id="ivac-chk-autostart"> Start automation right after files are selected';
-    pane.append(multi, easy, drop, chk);
+    const summary = document.createElement('div');
+    summary.id = 'ivac-files-summary';
+    summary.className = 'ivac-files-summary';
+    pane.append(summary, multi, easy, drop, chk);
+    const adv = document.createElement('details');
+    adv.className = 'ivac-adv';
+    adv.innerHTML = '<summary>Change one file / clear / manual upload</summary>';
+    chk.querySelector('input').checked = true;
+    chk.querySelector('input').addEventListener('change', (e) => { try { store.set('autoStartOnPick', e.target.checked); } catch (err) { /* ignore */ } });
+    Promise.resolve(store.get('autoStartOnPick', true)).then((v) => { chk.querySelector('input').checked = v !== false; }).catch(() => {});
 
     FILE_SLOTS.forEach((slot) => {
       const row = document.createElement('div');
@@ -431,7 +454,7 @@
       line.append(pick, name);
 
       row.append(head, line);
-      pane.appendChild(row);
+      adv.appendChild(row);
     });
 
     const clears = document.createElement('div');
@@ -443,7 +466,7 @@
       b.addEventListener('click', () => clearSlot(slot.key));
       clears.appendChild(b);
     });
-    pane.appendChild(clears);
+    adv.appendChild(clears);
 
     const all = document.createElement('button');
     all.className = 'ivac-btn ivac-btn-red ivac-full';
@@ -457,7 +480,9 @@
     const note = document.createElement('div');
     note.className = 'ivac-note';
     note.textContent = 'Files stay in this tab only (memory). Nothing is saved or submitted automatically.';
-    pane.append(all, apply, note);
+    adv.append(all, apply, note);
+    pane.appendChild(adv);
+    updateFilesSummary();
   }
 
 
@@ -827,6 +852,10 @@
     .ivac-file-list { font-size: 11px; color: #94a3b8; min-height: 16px; }
     .ivac-upload-btn { width: 100%; background: #14b8a6; }
     .ivac-note { font-size: 11px; color: #94a3b8; }
+    .ivac-files-summary { padding: 8px 10px; border-radius: 8px; background: #111c33; color: #facc15; font-size: 12px; font-weight: 600; }
+    .ivac-files-summary.ok { color: #22c55e; }
+    .ivac-adv > summary { cursor: pointer; font-size: 11px; color: #94a3b8; padding: 4px 0; }
+    .ivac-adv { display: flex; flex-direction: column; gap: 6px; }
     .ivac-fslot { background: #111c33; border-radius: 8px; padding: 6px 8px; display: flex; flex-direction: column; gap: 5px; }
     .ivac-fslot-head { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
     .ivac-fslot-title { font-weight: 600; }
@@ -1554,6 +1583,13 @@
         const all = getAllFileInputs();
         return all[qi] || all[all.length - 1] || null;
       }, 15000, 300, abort);
+      if (!input && !/file-upload/.test(location.pathname) && !opts.abort) {
+        entry.status = `Ready (${formatSize(entry.file.size)})`;
+        renderSlot(slot.key);
+        setStatus('Files are ready. They upload automatically when START reaches the upload page.', 'warn');
+        addLog('Not on the upload page yet - files stay ready; press START and they upload automatically.');
+        return false;
+      }
       if (!input) {
         entry.status = 'Error - no file input on page';
         renderSlot(slot.key);
