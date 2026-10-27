@@ -1323,7 +1323,9 @@
     if (!el) {
       if (!auto.visits['nf_' + key]) {
         auto.visits['nf_' + key] = true;
-        addLog(`Button ${re} not found yet - waiting. (LOG > Inspect page shows what is on the page)`, 'warn');
+        const cands = [...document.querySelectorAll('body *')].filter((e) => !e.closest('#ivac-helper-panel') && e.children.length < 4 && textOf(e).length < 60 && re.test(textOf(e)))
+          .slice(0, 4).map((e) => { const cs = getComputedStyle(e); return `<${e.tagName.toLowerCase()}> cursor=${cs.cursor} opacity=${cs.opacity} visible=${isVisible(e)} disabled=${isDisabledEl(e)}`; });
+        addLog(`Button ${re} not clickable yet. Candidates: ${cands.join(' | ') || 'none on page'}`, 'warn');
       }
       return false;
     }
@@ -1533,7 +1535,7 @@
     const body = textOf(document.body);
     const mm = body.match(/Select a mission\s+(.+?)\s+Select your IVAC center/i);
     const mission = mm ? mm[1].trim() : '';
-    if (mission && !v.missionLogged) { v.missionLogged = true; addLog(`Mission from your primary file: ${mission}`); }
+    if (mission && !/loading/i.test(mission) && !v.missionLogged) { v.missionLogged = true; addLog(`Mission from your primary file: ${mission}`); }
     const unselected = /Select your IVAC center\s*Select IVAC center/i.test(body);
     if (unselected) {
       // Open the center list once, then choose the center that belongs to the mission.
@@ -1622,7 +1624,7 @@
       let confirmed = false;
       const t0 = Date.now();
       // A page that never shows an applicant counter cannot confirm anything: do not wait the full 20 s.
-      const maxWait = before === null ? 12000 : 20000;
+      const maxWait = before === null ? 12000 : 40000;
       while (Date.now() - t0 < maxWait) {
         if (abort()) return false;
         const c = applicantCount();
@@ -1638,7 +1640,7 @@
       if (!confirmed) {
         entry.status = 'Error - not accepted by the page';
         renderSlot(slot.key);
-        addLog(`${slot.label}: the page did not add the applicant within 20 s (check size <= 500KB, PDF only).`, 'error');
+        addLog(`${slot.label}: the page did not add the applicant within 40 s (check size <= 500KB, PDF only).`, 'error');
         setStatus(`${slot.label}: upload not accepted.`, 'error');
         return false;
       }
